@@ -115,6 +115,8 @@ def admin_callback_handler(call: types.CallbackQuery):
         bot.delete_message(call.message.chat.id, call.message.message_id)
 
     # Инциденты
+    elif data == "admin_create_incident":
+        start_create_incident(call)
     elif data == "admin_incidents":
         show_active_incidents(call)
     elif data.startswith("admin_incident_"):
