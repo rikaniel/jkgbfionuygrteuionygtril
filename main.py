@@ -19,12 +19,12 @@ from py3xui import Api, Client
 
 from db import (
     init_db, get_user, get_all_users,
-    sync_nodes_from_config, sync_masking_sites_from_config,
-    get_all_nodes, get_all_masking_sites,
+    sync_nodes_from_config, sync_masking_sites_from_config, sync_inbounds_from_config,
+    get_all_nodes, get_all_masking_sites, get_all_inbounds,
     add_incident, get_incident, set_incident_message_id,
     add_admin, is_admin
 )
-from checks import check_node, check_website
+from checks import check_node, check_website, check_geo_resource
 
 # ------------------------------------------------------------------
 # Настройка логирования
@@ -54,6 +54,8 @@ INCIDENT_CHANNEL = GLOBAL["incident_channel"]
 REPORT_INTERVAL_HOURS = GLOBAL.get("report_interval_hours", 1)
 PING_TIMEOUT = GLOBAL.get("ping_timeout", 2)
 PING_COUNT = GLOBAL.get("ping_count", 1)
+GEOIP_URL = GLOBAL.get("geoip_url")
+GEOSITE_URL = GLOBAL.get("geosite_url")
 
 PROXY = GLOBAL.get("telegram_proxy")
 if PROXY:
@@ -68,13 +70,11 @@ bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode="Markdown")
 init_db()
 sync_nodes_from_config(CONFIG.get("nodes", []))
 sync_masking_sites_from_config(CONFIG.get("masking_sites", []))
+sync_inbounds_from_config(CONFIG.get("xray_inbounds", []))
 
 for admin_id in GLOBAL.get("admin_ids", []):
     add_admin(admin_id)
     logger.info(f"Добавлен администратор: {admin_id}")
-
-# Создаём бота
-bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode="Markdown")
 
 # ------------------------------------------------------------------
 # Вспомогательные функции 3x-ui
@@ -322,11 +322,18 @@ def handle_callback(call: types.CallbackQuery):
 # Фоновые задачи (запускаются в отдельном потоке)
 # ------------------------------------------------------------------
 def scheduled_full_check():
+    """Полная проверка всех систем: ноды, сайты, geo-ресурсы."""
     logger.info("Запуск плановой проверки нод и сайтов...")
+    
+    # Получаем все inbound'ы для прокси-пинга
+    inbounds = get_all_inbounds()
+    
+    # Проверка нод через proxy
     nodes = get_all_nodes()
     for node in nodes:
         target = f"node:{node['name']}"
-        alive = check_node(node['ip'], node['port'], timeout=PING_TIMEOUT)
+        # Пинг через первый доступный inbound (proxy)
+        alive = check_node(node['ip'], node['port'], timeout=PING_TIMEOUT, inbounds=inbounds)
         if not alive:
             incident_id = add_incident(
                 importance="high",
@@ -340,6 +347,7 @@ def scheduled_full_check():
                     set_incident_message_id(incident_id, msg_id)
                 logger.warning(f"Создан инцидент {incident_id} для ноды {node['name']}")
 
+    # Проверка сайтов маскировки
     sites = get_all_masking_sites()
     for site in sites:
         target = f"site:{site['url']}"
@@ -356,6 +364,40 @@ def scheduled_full_check():
                 if msg_id:
                     set_incident_message_id(incident_id, msg_id)
                 logger.warning(f"Создан инцидент {incident_id} для сайта {site['url']}")
+    
+    # Проверка GeoIP и GeoSite ресурсов
+    if GEOIP_URL:
+        target = "geo:geoip"
+        ok = check_geo_resource(GEOIP_URL)
+        if not ok:
+            incident_id = add_incident(
+                importance="high",
+                description=f"GeoIP ресурс **{GEOIP_URL}** недоступен.",
+                target=target
+            )
+            if incident_id:
+                incident = get_incident(incident_id)
+                msg_id = post_incident_to_channel(incident)
+                if msg_id:
+                    set_incident_message_id(incident_id, msg_id)
+                logger.warning(f"Создан инцидент {incident_id} для GeoIP")
+    
+    if GEOSITE_URL:
+        target = "geo:geosite"
+        ok = check_geo_resource(GEOSITE_URL)
+        if not ok:
+            incident_id = add_incident(
+                importance="high",
+                description=f"GeoSite ресурс **{GEOSITE_URL}** недоступен.",
+                target=target
+            )
+            if incident_id:
+                incident = get_incident(incident_id)
+                msg_id = post_incident_to_channel(incident)
+                if msg_id:
+                    set_incident_message_id(incident_id, msg_id)
+                logger.warning(f"Создан инцидент {incident_id} для GeoSite")
+    
     logger.info("Плановая проверка завершена")
 
 def scheduler_thread():

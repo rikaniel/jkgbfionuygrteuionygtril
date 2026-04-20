@@ -1,0 +1,43 @@
+{
+  "global_settings": {
+    "telegram_token": "YOUR_BOT_TOKEN_HERE",
+    "telegram_proxy": "",
+    "panel_host": "https://your-panel.com",
+    "panel_username": "admin",
+    "panel_password": "password",
+    "subscription_base_url": "https://sub.example.com/",
+    "incident_channel": "@your_channel",
+    "report_interval_hours": 1,
+    "ping_timeout": 5,
+    "ping_count": 3,
+    "admin_ids": [123456789]
+  },
+  "nodes": [
+    {
+      "name": "node1",
+      "ip": "192.168.1.1",
+      "port": 443
+    }
+  ],
+  "masking_sites": [
+    {
+      "url": "https://example.com",
+      "expected_content": "Example Domain"
+    }
+  ],
+  "geoip_url": "https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/geoip.dat",
+  "geosite_url": "https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/geosite.dat",
+  "xray_inbounds": [
+    {
+      "name": "proxy1",
+      "protocol": "vmess",
+      "settings": {
+        "address": "proxy1.example.com",
+        "port": 443,
+        "id": "uuid-here",
+        "alterId": 0,
+        "security": "auto"
+      }
+    }
+  ]
+}
