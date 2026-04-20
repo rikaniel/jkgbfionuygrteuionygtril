@@ -20,6 +20,7 @@ from db import (
     get_all_inbounds, add_inbound, delete_inbound
 )
 from checks import check_node, check_website, check_geo_resource
+from main import main_menu_keyboard
 
 logger = logging.getLogger(__name__)
 
@@ -68,21 +69,87 @@ def update_incident_channel_post(incident: Dict[str, Any]):
 @require_admin
 def admin_command(message: types.Message):
     """Обработчик команды /admin."""
-    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
     markup.add(
-        types.InlineKeyboardButton("📋 Активные инциденты", callback_data="admin_incidents"),
-        types.InlineKeyboardButton("➕ Создать инцидент", callback_data="admin_create_incident"),
-        types.InlineKeyboardButton("👥 Управление пользователями", callback_data="admin_users_menu"),
-        types.InlineKeyboardButton("🌐 Управление нодами", callback_data="admin_nodes_menu"),
-        types.InlineKeyboardButton("🔗 Сайты маскировки", callback_data="admin_sites_menu"),
-        types.InlineKeyboardButton("👑 Администраторы", callback_data="admin_admins_menu"),
-        types.InlineKeyboardButton("❌ Закрыть", callback_data="admin_close")
+        "📋 Активные инциденты",
+        "➕ Создать инцидент",
+        "👥 Управление пользователями",
+        "🌐 Управление нодами",
+        "🔗 Сайты маскировки",
+        "👑 Администраторы",
+        "❌ Закрыть"
     )
     bot.send_message(
         message.chat.id,
         "🔧 **Административная панель**\nВыберите раздел:",
         reply_markup=markup
     )
+
+def admin_menu_handler(message: types.Message):
+    """Обработчик кнопки 'Админ-панель' из главного меню."""
+    admin_command(message)
+
+# ---------------------------- Обработчик текстовых сообщений админки ----------------------------
+@require_admin
+def admin_text_handler(message: types.Message):
+    """Обработчик текстовых кнопок ReplyKeyboard для админ-панели."""
+    text = message.text
+    
+    if text == "📋 Активные инциденты":
+        # Эмуляция колбэка admin_incidents
+        class FakeCall:
+            def __init__(self, msg):
+                self.data = "admin_incidents"
+                self.from_user = msg.from_user
+                self.message = msg
+        admin_callback_handler(FakeCall(message))
+    
+    elif text == "➕ Создать инцидент":
+        class FakeCall:
+            def __init__(self, msg):
+                self.data = "admin_create_incident"
+                self.from_user = msg.from_user
+                self.message = msg
+        admin_callback_handler(FakeCall(message))
+    
+    elif text == "👥 Управление пользователями":
+        class FakeCall:
+            def __init__(self, msg):
+                self.data = "admin_users_menu"
+                self.from_user = msg.from_user
+                self.message = msg
+        admin_callback_handler(FakeCall(message))
+    
+    elif text == "🌐 Управление нодами":
+        class FakeCall:
+            def __init__(self, msg):
+                self.data = "admin_nodes_menu"
+                self.from_user = msg.from_user
+                self.message = msg
+        admin_callback_handler(FakeCall(message))
+    
+    elif text == "🔗 Сайты маскировки":
+        class FakeCall:
+            def __init__(self, msg):
+                self.data = "admin_sites_menu"
+                self.from_user = msg.from_user
+                self.message = msg
+        admin_callback_handler(FakeCall(message))
+    
+    elif text == "👑 Администраторы":
+        class FakeCall:
+            def __init__(self, msg):
+                self.data = "admin_admins_menu"
+                self.from_user = msg.from_user
+                self.message = msg
+        admin_callback_handler(FakeCall(message))
+    
+    elif text == "❌ Закрыть":
+        bot.send_message(
+            message.chat.id,
+            "👋 Главное меню",
+            reply_markup=main_menu_keyboard()
+        )
 
 # ---------------------------- Главный обработчик колбэков ----------------------------
 def admin_callback_handler(call: types.CallbackQuery):
@@ -807,6 +874,9 @@ def register_handlers(bot_instance: telebot.TeleBot, incident_channel: str):
 
     # Команда /admin
     bot.register_message_handler(admin_command, commands=['admin'])
+
+    # Обработчик текстовых сообщений для админ-панели (кнопки ReplyKeyboard)
+    bot.register_message_handler(admin_text_handler, func=lambda message: not message.text.startswith('/'))
 
     # Главный обработчик колбэков админки (паттерн 'admin_')
     bot.register_callback_query_handler(admin_callback_handler, func=lambda call: call.data.startswith('admin_'))
