@@ -22,7 +22,7 @@ from db import (
     sync_nodes_from_config, sync_masking_sites_from_config, sync_inbounds_from_config,
     get_all_nodes, get_all_masking_sites, get_all_inbounds,
     add_incident, get_incident, set_incident_message_id,
-    add_admin, is_admin
+    add_admin, is_admin, get_inbound_by_name
 )
 from checks import check_node, check_website, check_geo_resource
 
@@ -106,28 +106,61 @@ def get_api_client() -> Api:
         logger.error(f"Ошибка входа в 3x-ui панель: {e}")
         raise
 
-def get_client_by_email(inbound_id: int, email: str) -> Optional[Client]:
+def get_client_by_email(inbound_name: str, email: str) -> Optional[Client]:
+    """Получает клиента по имени inbound и email через 3x-ui API."""
     try:
         api = get_api_client()
-        inbound = api.inbound.get_by_id(inbound_id)
-        for client in inbound.settings.clients:
+        
+        # Получаем все inbound'ы из API и ищем по имени
+        all_inbounds = api.inbound.get_list()
+        inbound_id = None
+        
+        for ib in all_inbounds:
+            if ib.name == inbound_name or str(ib.id) == str(inbound_name):
+                inbound_id = ib.id
+                logger.info(f"Найден inbound '{inbound_name}' с ID={inbound_id}")
+                break
+        
+        if not inbound_id:
+            logger.error(f"Inbound '{inbound_name}' не найден в 3x-ui панели")
+            return None
+            
+        # Получаем inbound из API по ID
+        inbound_data = api.inbound.get_by_id(inbound_id)
+        
+        # Ищем клиента по email
+        for client in inbound_data.settings.clients:
             if client.email == email:
+                logger.info(f"Клиент {email} найден в inbound {inbound_name}")
                 return client
+        
+        logger.warning(f"Клиент {email} не найден в inbound {inbound_name} (ID: {inbound_id})")
+        logger.warning(f"Доступные клиенты в inbound: {[c.email for c in inbound_data.settings.clients]}")
         return None
+        
     except Exception as e:
-        logger.error(f"Ошибка получения клиента {email}: {e}")
+        logger.error(f"Ошибка получения клиента {email}: {e}", exc_info=True)
         # Пробуем пересоздать клиента при ошибке сессии
         try:
             global _api_client, _api_last_login_time
             _api_client = Api(PANEL_HOST, PANEL_USER, PANEL_PASS)
             _api_client.login()
             _api_last_login_time = time.time()
-            inbound = _api_client.inbound.get_by_id(inbound_id)
-            for client in inbound.settings.clients:
-                if client.email == email:
-                    return client
+            
+            # Повторяем поиск
+            all_inbounds = _api_client.inbound.get_list()
+            for ib in all_inbounds:
+                if ib.name == inbound_name or str(ib.id) == str(inbound_name):
+                    inbound_id = ib.id
+                    break
+            
+            if inbound_id:
+                inbound_data = _api_client.inbound.get_by_id(inbound_id)
+                for client in inbound_data.settings.clients:
+                    if client.email == email:
+                        return client
         except Exception as e2:
-            logger.error(f"Повторная ошибка получения клиента {email}: {e2}")
+            logger.error(f"Повторная ошибка получения клиента {email}: {e2}", exc_info=True)
         return None
 
 def get_client_traffic(client: Client):
@@ -289,14 +322,23 @@ def handle_message(message: types.Message):
         )
         return
 
-    inbound_id = user["inbound_id"]
+    inbound_name = user.get("inbound_name") or user.get("inbound_id")
     client_email = user["client_email"]
 
-    client = get_client_by_email(inbound_id, client_email)
+    if not inbound_name:
+        bot.send_message(
+            message.chat.id,
+            f"❌ Ошибка конфигурации: не указан inbound для пользователя.",
+            reply_markup=back_to_menu_keyboard()
+        )
+        logger.error(f"У пользователя {user_id} не указан inbound_name или inbound_id")
+        return
+
+    client = get_client_by_email(inbound_name, client_email)
     if not client:
         bot.send_message(
             message.chat.id,
-            f"❌ Клиент `{client_email}` не найден в inbound {inbound_id}.",
+            f"❌ Клиент `{client_email}` не найден в inbound '{inbound_name}'. Проверьте настройки.",
             reply_markup=back_to_menu_keyboard()
         )
         return

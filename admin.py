@@ -489,16 +489,15 @@ def add_user_tg_step(message: types.Message):
         bot.reply_to(message, "❌ Введите число.")
         return
     user_states[message.from_user.id]["tg_id"] = tg_id
-    msg = bot.send_message(message.chat.id, "Введите inbound_id:")
+    msg = bot.send_message(message.chat.id, "Введите inbound_name (имя inbound из 3x-ui):")
     bot.register_next_step_handler(msg, add_user_inbound_step)
 
 def add_user_inbound_step(message: types.Message):
-    try:
-        inbound = int(message.text.strip())
-    except ValueError:
-        bot.reply_to(message, "❌ Введите число.")
+    inbound_name = message.text.strip()
+    if not inbound_name:
+        bot.reply_to(message, "❌ Inbound name не может быть пустым.")
         return
-    user_states[message.from_user.id]["inbound"] = inbound
+    user_states[message.from_user.id]["inbound_name"] = inbound_name
     msg = bot.send_message(message.chat.id, "Введите client_email:")
     bot.register_next_step_handler(msg, add_user_email_step)
 
@@ -517,8 +516,8 @@ def add_user_path_step(message: types.Message):
         bot.reply_to(message, "❌ Путь не может быть пустым.")
         return
     state = user_states.pop(message.from_user.id)
-    add_user(state["tg_id"], state["inbound"], state["email"], path)
-    bot.send_message(message.chat.id, f"✅ Пользователь {state['tg_id']} добавлен.")
+    add_user(state["tg_id"], state["inbound_name"], state["email"], path)
+    bot.send_message(message.chat.id, f"✅ Пользователь {state['tg_id']} добавлен с inbound '{state['inbound_name']}'.")
     admin_command(message)
 
 def start_delete_user(call: types.CallbackQuery):

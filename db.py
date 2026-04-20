@@ -26,7 +26,7 @@ def init_db() -> None:
     c.execute('''
         CREATE TABLE IF NOT EXISTS users (
             telegram_id INTEGER PRIMARY KEY,
-            inbound_id INTEGER NOT NULL,
+            inbound_name TEXT NOT NULL,
             client_email TEXT NOT NULL,
             subscription_path TEXT NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -94,7 +94,7 @@ def get_user(telegram_id: int) -> Optional[Dict[str, Any]]:
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute(
-        "SELECT telegram_id, inbound_id, client_email, subscription_path, created_at FROM users WHERE telegram_id = ?",
+        "SELECT telegram_id, inbound_name, client_email, subscription_path, created_at FROM users WHERE telegram_id = ?",
         (telegram_id,)
     )
     row = c.fetchone()
@@ -102,7 +102,7 @@ def get_user(telegram_id: int) -> Optional[Dict[str, Any]]:
     if row:
         return {
             "telegram_id": row[0],
-            "inbound_id": row[1],
+            "inbound_name": row[1],
             "client_email": row[2],
             "subscription_path": row[3],
             "created_at": row[4]
@@ -110,13 +110,13 @@ def get_user(telegram_id: int) -> Optional[Dict[str, Any]]:
     return None
 
 
-def add_user(telegram_id: int, inbound_id: int, client_email: str, subscription_path: str) -> None:
+def add_user(telegram_id: int, inbound_name: str, client_email: str, subscription_path: str) -> None:
     """Добавляет или обновляет пользователя."""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute(
-        "INSERT OR REPLACE INTO users (telegram_id, inbound_id, client_email, subscription_path) VALUES (?, ?, ?, ?)",
-        (telegram_id, inbound_id, client_email, subscription_path)
+        "INSERT OR REPLACE INTO users (telegram_id, inbound_name, client_email, subscription_path) VALUES (?, ?, ?, ?)",
+        (telegram_id, inbound_name, client_email, subscription_path)
     )
     conn.commit()
     conn.close()
@@ -140,13 +140,13 @@ def get_all_users() -> List[Dict[str, Any]]:
     """Возвращает список всех пользователей."""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT telegram_id, inbound_id, client_email, subscription_path, created_at FROM users ORDER BY created_at")
+    c.execute("SELECT telegram_id, inbound_name, client_email, subscription_path, created_at FROM users ORDER BY created_at")
     rows = c.fetchall()
     conn.close()
     return [
         {
             "telegram_id": row[0],
-            "inbound_id": row[1],
+            "inbound_name": row[1],
             "client_email": row[2],
             "subscription_path": row[3],
             "created_at": row[4]
@@ -507,3 +507,23 @@ def delete_inbound(name: str) -> bool:
     if deleted:
         logger.info(f"Xray inbound '{name}' удалён")
     return deleted
+
+
+def get_inbound_by_name(name: str) -> Optional[Dict[str, Any]]:
+    """Возвращает данные inbound по имени."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT name, protocol, settings FROM xray_inbounds WHERE name = ?", (name,))
+    row = c.fetchone()
+    conn.close()
+    if row:
+        try:
+            settings = json.loads(row[2])
+        except:
+            settings = {}
+        return {
+            "name": row[0],
+            "protocol": row[1],
+            "settings": settings
+        }
+    return None
