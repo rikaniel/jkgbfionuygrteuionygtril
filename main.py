@@ -79,14 +79,36 @@ for admin_id in GLOBAL.get("admin_ids", []):
 # ------------------------------------------------------------------
 # Вспомогательные функции 3x-ui
 # ------------------------------------------------------------------
+# Глобальный API клиент с автоматическим переподключением
+_api_client = None
+_api_last_login_time = 0
+_API_SESSION_TTL = 300  # 5 минут
+
 def get_api_client() -> Api:
-    api = Api(PANEL_HOST, PANEL_USER, PANEL_PASS)
-    api.login()
-    return api
+    """Возвращает глобальный API клиент с кэшированием сессии."""
+    global _api_client, _api_last_login_time
+    
+    import time
+    current_time = time.time()
+    
+    # Если клиент существует и сессия ещё действительна - возвращаем его
+    if _api_client is not None and (current_time - _api_last_login_time) < _API_SESSION_TTL:
+        return _api_client
+    
+    # Создаём нового клиента
+    try:
+        _api_client = Api(PANEL_HOST, PANEL_USER, PANEL_PASS)
+        _api_client.login()
+        _api_last_login_time = current_time
+        logger.info("Успешный вход в 3x-ui панель")
+        return _api_client
+    except Exception as e:
+        logger.error(f"Ошибка входа в 3x-ui панель: {e}")
+        raise
 
 def get_client_by_email(inbound_id: int, email: str) -> Optional[Client]:
-    api = get_api_client()
     try:
+        api = get_api_client()
         inbound = api.inbound.get_by_id(inbound_id)
         for client in inbound.settings.clients:
             if client.email == email:
@@ -94,6 +116,18 @@ def get_client_by_email(inbound_id: int, email: str) -> Optional[Client]:
         return None
     except Exception as e:
         logger.error(f"Ошибка получения клиента {email}: {e}")
+        # Пробуем пересоздать клиента при ошибке сессии
+        try:
+            global _api_client, _api_last_login_time
+            _api_client = Api(PANEL_HOST, PANEL_USER, PANEL_PASS)
+            _api_client.login()
+            _api_last_login_time = time.time()
+            inbound = _api_client.inbound.get_by_id(inbound_id)
+            for client in inbound.settings.clients:
+                if client.email == email:
+                    return client
+        except Exception as e2:
+            logger.error(f"Повторная ошибка получения клиента {email}: {e2}")
         return None
 
 def get_client_traffic(client: Client):
@@ -223,9 +257,9 @@ def handle_callback(call: types.CallbackQuery):
     user_id = call.from_user.id
     data = call.data
 
-    # Админские колбэки обрабатываются в отдельном модуле
-    if data.startswith("admin_"):
-        # Будет обработано в admin.py
+    # Админские колбэки обрабатываются в отдельном модуле admin.py
+    if data.startswith("admin_") or data.startswith("inc_imp_"):
+        # Эти колбэки будут обработаны в admin_callback_handler
         return
 
     user = get_user(user_id)
@@ -416,6 +450,11 @@ def scheduler_thread():
 # ------------------------------------------------------------------
 if __name__ == "__main__":
     logger.info("🤖 Бот запущен...")
+    
+    # Регистрируем админские хендлеры
+    from admin import register_handlers
+    register_handlers(bot, INCIDENT_CHANNEL)
+    
     # Запускаем планировщик в отдельном потоке
     threading.Thread(target=scheduler_thread, daemon=True).start()
     # Запускаем бота
