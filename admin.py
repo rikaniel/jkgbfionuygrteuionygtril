@@ -16,9 +16,10 @@ from db import (
     update_incident_description, add_incident, set_incident_message_id,
     is_admin, add_admin, remove_admin, get_all_admins,
     get_all_nodes, add_node, delete_node,
-    get_all_masking_sites, add_masking_site, delete_masking_site
+    get_all_masking_sites, add_masking_site, delete_masking_site,
+    get_all_inbounds, add_inbound, delete_inbound
 )
-from checks import check_node, check_website
+from checks import check_node, check_website, check_geo_resource
 
 logger = logging.getLogger(__name__)
 
@@ -193,6 +194,19 @@ def admin_callback_handler(call: types.CallbackQuery):
     elif data.startswith("admin_admin_del_"):
         tg_id = int(data.replace("admin_admin_del_", ""))
         confirm_remove_admin(call, tg_id)
+
+    # Xray Inbounds
+    elif data == "admin_inbounds_menu":
+        inbounds_menu(call)
+    elif data == "admin_inbounds_list":
+        list_inbounds(call)
+    elif data == "admin_inbounds_add":
+        start_add_inbound(call)
+    elif data == "admin_inbounds_delete":
+        start_delete_inbound(call)
+    elif data.startswith("admin_inbound_del_"):
+        name = data.replace("admin_inbound_del_", "")
+        confirm_delete_inbound(call, name)
 
     bot.answer_callback_query(call.id)
 
@@ -468,6 +482,7 @@ def nodes_menu(call: types.CallbackQuery):
         types.InlineKeyboardButton("➕ Добавить ноду", callback_data="admin_nodes_add"),
         types.InlineKeyboardButton("❌ Удалить ноду", callback_data="admin_nodes_delete"),
         types.InlineKeyboardButton("🔄 Проверить все ноды", callback_data="admin_nodes_check"),
+        types.InlineKeyboardButton("🔗 Xray Inbounds", callback_data="admin_inbounds_menu"),
         types.InlineKeyboardButton("◀️ Назад", callback_data="admin_menu")
     )
     bot.edit_message_text("🌐 **Управление нодами**", call.message.chat.id, call.message.message_id, reply_markup=markup)
@@ -542,10 +557,14 @@ def check_all_nodes_action(call: types.CallbackQuery):
     if not nodes:
         bot.edit_message_text("Нет нод для проверки.", call.message.chat.id, call.message.message_id)
         return
-    bot.edit_message_text("⏳ Проверяю доступность нод...", call.message.chat.id, call.message.message_id)
+    bot.edit_message_text("⏳ Проверяю доступность нод через proxy...", call.message.chat.id, call.message.message_id)
+    
+    # Получаем inbounds для прокси-проверки
+    inbounds = get_all_inbounds()
+    
     lines = ["**Результаты проверки нод:**"]
     for node in nodes:
-        alive = check_node(node['ip'], node['port'])
+        alive = check_node(node['ip'], node['port'], inbounds=inbounds)
         status = "✅ Доступна" if alive else "❌ Недоступна"
         lines.append(f"• **{node['name']}** ({node['ip']}:{node['port']}): {status}")
     markup = types.InlineKeyboardMarkup()
@@ -691,6 +710,92 @@ def confirm_remove_admin(call: types.CallbackQuery, tg_id: int):
     else:
         bot.answer_callback_query(call.id, "Ошибка", show_alert=True)
     admins_menu(call)
+
+# ---------------------------- Управление Xray Inbounds ----------------------------
+def inbounds_menu(call: types.CallbackQuery):
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        types.InlineKeyboardButton("📋 Список Inbounds", callback_data="admin_inbounds_list"),
+        types.InlineKeyboardButton("➕ Добавить Inbound", callback_data="admin_inbounds_add"),
+        types.InlineKeyboardButton("❌ Удалить Inbound", callback_data="admin_inbounds_delete"),
+        types.InlineKeyboardButton("◀️ Назад", callback_data="admin_nodes_menu")
+    )
+    bot.edit_message_text("🔗 **Управление Xray Inbounds**\nЭти прокси используются для пинга нод.", call.message.chat.id, call.message.message_id, reply_markup=markup)
+
+def list_inbounds(call: types.CallbackQuery):
+    inbounds = get_all_inbounds()
+    if not inbounds:
+        bot.edit_message_text("🔗 Нет добавленных Xray Inbounds.", call.message.chat.id, call.message.message_id)
+        return
+    text = "**Список Xray Inbounds:**\n"
+    for ib in inbounds:
+        text += f"• **{ib['name']}** — {ib['protocol']}\n"
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("◀️ Назад", callback_data="admin_inbounds_menu"))
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup)
+
+def start_add_inbound(call: types.CallbackQuery):
+    user_states[call.from_user.id] = {"action": "add_inbound"}
+    msg = bot.edit_message_text("Введите имя inbound (уникальное):", call.message.chat.id, call.message.message_id)
+    bot.register_next_step_handler(msg, add_inbound_name_step)
+
+def add_inbound_name_step(message: types.Message):
+    name = message.text.strip()
+    if not name:
+        bot.reply_to(message, "Имя не может быть пустым.")
+        return
+    user_states[message.from_user.id]["name"] = name
+    msg = bot.send_message(message.chat.id, "Введите протокол (vmess, vless, trojan и т.д.):")
+    bot.register_next_step_handler(msg, add_inbound_protocol_step)
+
+def add_inbound_protocol_step(message: types.Message):
+    protocol = message.text.strip().lower()
+    user_states[message.from_user.id]["protocol"] = protocol
+    msg = bot.send_message(message.chat.id, "Введите адрес proxy (например, proxy1.example.com):")
+    bot.register_next_step_handler(msg, add_inbound_address_step)
+
+def add_inbound_address_step(message: types.Message):
+    address = message.text.strip()
+    user_states[message.from_user.id]["address"] = address
+    msg = bot.send_message(message.chat.id, "Введите порт:")
+    bot.register_next_step_handler(msg, add_inbound_port_step)
+
+def add_inbound_port_step(message: types.Message):
+    try:
+        port = int(message.text.strip())
+    except ValueError:
+        bot.reply_to(message, "Порт должен быть числом.")
+        return
+    state = user_states.pop(message.from_user.id)
+    settings = {
+        "address": state["address"],
+        "port": port
+    }
+    add_inbound(state["name"], state["protocol"], settings)
+    bot.send_message(message.chat.id, f"✅ Xray inbound {state['name']} добавлен.")
+    admin_command(message)
+
+def start_delete_inbound(call: types.CallbackQuery):
+    inbounds = get_all_inbounds()
+    if not inbounds:
+        bot.edit_message_text("Нет Inbounds для удаления.", call.message.chat.id, call.message.message_id)
+        return
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for ib in inbounds:
+        markup.add(types.InlineKeyboardButton(
+            f"❌ {ib['name']} ({ib['protocol']})",
+            callback_data=f"admin_inbound_del_{ib['name']}"
+        ))
+    markup.add(types.InlineKeyboardButton("◀️ Назад", callback_data="admin_inbounds_menu"))
+    bot.edit_message_text("Выберите Inbound для удаления:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+
+def confirm_delete_inbound(call: types.CallbackQuery, name: str):
+    if delete_inbound(name):
+        bot.answer_callback_query(call.id, "Inbound удалён", show_alert=True)
+        bot.edit_message_text(f"✅ Xray inbound {name} удалён.", call.message.chat.id, call.message.message_id)
+    else:
+        bot.answer_callback_query(call.id, "Ошибка удаления", show_alert=True)
+    inbounds_menu(call)
 
 # ---------------------------- Регистрация хендлеров ----------------------------
 def register_handlers(bot_instance: telebot.TeleBot, incident_channel: str):

@@ -7,6 +7,7 @@
 import sqlite3
 import random
 import string
+import json
 import logging
 from datetime import datetime
 from typing import List, Dict, Optional, Any
@@ -69,6 +70,16 @@ def init_db() -> None:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             url TEXT NOT NULL UNIQUE,
             expected_content TEXT
+        )
+    ''')
+
+    # Xray Inbounds (прокси для пинга)
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS xray_inbounds (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            protocol TEXT NOT NULL,
+            settings TEXT NOT NULL
         )
     ''')
 
@@ -426,4 +437,73 @@ def delete_masking_site(url: str) -> bool:
     conn.close()
     if deleted:
         logger.info(f"Сайт маскировки '{url}' удалён")
+    return deleted
+
+
+# ---------------------------- Xray Inbounds ----------------------------
+def sync_inbounds_from_config(inbounds_config: List[Dict[str, Any]]) -> None:
+    """
+    Синхронизирует таблицу xray_inbounds с конфигурацией.
+    Добавляет новые inbound'ы, обновляет существующие (по name).
+    """
+    if not inbounds_config:
+        return
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    for inbound in inbounds_config:
+        settings_json = json.dumps(inbound.get('settings', {}))
+        c.execute(
+            "INSERT OR REPLACE INTO xray_inbounds (name, protocol, settings) VALUES (?, ?, ?)",
+            (inbound['name'], inbound.get('protocol', 'vmess'), settings_json)
+        )
+    conn.commit()
+    conn.close()
+    logger.info(f"Синхронизировано {len(inbounds_config)} Xray inbound'ов")
+
+
+def get_all_inbounds() -> List[Dict[str, Any]]:
+    """Возвращает список всех Xray inbound'ов."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT name, protocol, settings FROM xray_inbounds ORDER BY name")
+    rows = c.fetchall()
+    conn.close()
+    result = []
+    for row in rows:
+        try:
+            settings = json.loads(row[2])
+        except:
+            settings = {}
+        result.append({
+            "name": row[0],
+            "protocol": row[1],
+            "settings": settings
+        })
+    return result
+
+
+def add_inbound(name: str, protocol: str, settings: Dict[str, Any]) -> None:
+    """Добавляет или обновляет Xray inbound."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    settings_json = json.dumps(settings)
+    c.execute(
+        "INSERT OR REPLACE INTO xray_inbounds (name, protocol, settings) VALUES (?, ?, ?)",
+        (name, protocol, settings_json)
+    )
+    conn.commit()
+    conn.close()
+    logger.info(f"Xray inbound '{name}' добавлен/обновлён")
+
+
+def delete_inbound(name: str) -> bool:
+    """Удаляет Xray inbound по имени."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM xray_inbounds WHERE name = ?", (name,))
+    deleted = c.rowcount > 0
+    conn.commit()
+    conn.close()
+    if deleted:
+        logger.info(f"Xray inbound '{name}' удалён")
     return deleted
