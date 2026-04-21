@@ -219,29 +219,46 @@ class XUIAPI:
         return None
 
     def get_client_stats(self, inbound_id: int, email: str) -> Optional[Dict]:
-        """Получение статистики клиента"""
+        """Получение статистики клиента из данных inbound"""
         if not self.is_logged_in and not self.login():
             return None
         
-        endpoints = [
-            f'/panel/api/inbounds/getClientStats/{inbound_id}/{email}',
-            f'/api/inbounds/getClientStats/{inbound_id}/{email}'
-        ]
+        # Получаем список всех inbound'ов и ищем нужный
+        inbounds = self.get_inbounds()
+        if not inbounds:
+            logger.error("Не удалось получить список inbound'ов")
+            return None
         
-        for endpoint in endpoints:
-            try:
-                url = f"{self.base_url}{endpoint}"
-                response = self.session.get(url, timeout=10)
+        for inbound in inbounds:
+            if inbound.get('id') == inbound_id:
+                # Получаем настройки inbound
+                settings_raw = inbound.get('settings', '{}')
                 
-                if response.status_code == 200:
-                    data = response.json()
-                    if isinstance(data, dict):
-                        if data.get('success', False) or data.get('status') == 'success':
-                            return data.get('obj', data.get('data', {}))
-            except Exception as e:
-                logger.debug(f"Ошибка получения статистики через {endpoint}: {e}")
-                continue
+                # Если settings - строка (JSON), парсим её
+                if isinstance(settings_raw, str):
+                    try:
+                        settings = json.loads(settings_raw)
+                    except json.JSONDecodeError as e:
+                        logger.error(f"Ошибка парсинга JSON settings для inbound {inbound_id}: {e}")
+                        return None
+                else:
+                    settings = settings_raw
+                
+                # Ищем клиента в списке
+                clients = settings.get('clients', [])
+                for client in clients:
+                    if client.get('email') == email:
+                        # Возвращаем статистику из данных клиента
+                        return {
+                            'up': client.get('up', 0),
+                            'down': client.get('down', 0),
+                            'total': client.get('total', 0)
+                        }
+                
+                logger.warning(f"Клиент {email} не найден в inbound {inbound_id}")
+                return None
         
+        logger.warning(f"Inbound {inbound_id} не найден")
         return None
 
     def reset_client_traffic(self, inbound_id: int, email: str) -> bool:
