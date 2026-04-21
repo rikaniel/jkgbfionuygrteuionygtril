@@ -151,6 +151,8 @@ def admin_text_handler(message: types.Message):
             reply_markup=main_menu_keyboard()
         )
 
+# Регистрируем обработчик текстовых сообщений в main.py через decorator
+
 # ---------------------------- Главный обработчик колбэков ----------------------------
 def admin_callback_handler(call: types.CallbackQuery):
     """Маршрутизация всех admin_* колбэков."""
@@ -873,9 +875,6 @@ def register_handlers(bot_instance: telebot.TeleBot, incident_channel: str):
 
     # Команда /admin
     bot.register_message_handler(admin_command, commands=['admin'])
-
-    # Обработчик текстовых сообщений для админ-панели (кнопки ReplyKeyboard)
-    bot.register_message_handler(admin_text_handler, func=lambda message: not message.text.startswith('/'))
 
     # Главный обработчик колбэков админки (паттерн 'admin_')
     bot.register_callback_query_handler(admin_callback_handler, func=lambda call: call.data.startswith('admin_'))

@@ -291,6 +291,16 @@ def handle_message(message: types.Message):
     if text.startswith('/'):
         return
 
+    # Проверяем, является ли пользователь админом и пытается ли использовать админ-меню
+    if is_admin(user_id):
+        from admin import admin_text_handler, require_admin
+        # Обработка текстовых кнопок админ-панели
+        admin_texts = ["📋 Активные инциденты", "➕ Создать инцидент", "👥 Управление пользователями", 
+                       "🌐 Управление нодами", "🔗 Сайты маскировки", "👑 Администраторы", "❌ Закрыть"]
+        if text in admin_texts:
+            admin_text_handler(message)
+            return
+
     user = get_user(user_id)
     if not user:
         bot.reply_to(message, "⛔ Доступ запрещён.")
@@ -400,6 +410,26 @@ def handle_message(message: types.Message):
 # ------------------------------------------------------------------
 # Фоновые задачи (запускаются в отдельном потоке)
 # ------------------------------------------------------------------
+
+# Retry configuration для анти-фолс-позитив
+RETRY_ATTEMPTS = 3
+RETRY_DELAY_SECONDS = 10
+AUTO_TRANSITION_MINUTES = 5  # Время до авто-перевода registered -> in_progress
+
+def check_node_with_retry(node: Dict, inbounds: List[Dict], timeout: int, max_attempts: int = RETRY_ATTEMPTS) -> tuple:
+    """
+    Проверяет ноду с retry логикой для предотвращения false positives.
+    Возвращает (is_alive, attempts_made)
+    """
+    for attempt in range(max_attempts):
+        alive = check_node(node['ip'], node['port'], timeout=timeout, inbounds=inbounds)
+        if alive:
+            return (True, attempt + 1)
+        if attempt < max_attempts - 1:
+            logger.warning(f"Попытка {attempt + 1} проверки ноды {node['name']} не удалась, ждём {RETRY_DELAY_SECONDS}с...")
+            time.sleep(RETRY_DELAY_SECONDS)
+    return (False, max_attempts)
+
 def scheduled_full_check():
     """Полная проверка всех систем: ноды, сайты, geo-ресурсы."""
     logger.info("Запуск плановой проверки нод и сайтов...")
@@ -407,16 +437,24 @@ def scheduled_full_check():
     # Получаем все inbound'ы для прокси-пинга
     inbounds = get_all_inbounds()
     
-    # Проверка нод через proxy
+    # Проверка нод через proxy с retry логикой
     nodes = get_all_nodes()
     for node in nodes:
         target = f"node:{node['name']}"
-        # Пинг через первый доступный inbound (proxy)
-        alive = check_node(node['ip'], node['port'], timeout=PING_TIMEOUT, inbounds=inbounds)
+        
+        # Проверка с retry
+        alive, attempts = check_node_with_retry(node, inbounds, PING_TIMEOUT)
+        
+        # Логируем статус для uptime статистики
+        from db import log_node_status
+        rtt_ms = None  # Можно добавить измерение RTT в check_node
+        log_node_status(node['name'], 'up' if alive else 'down', rtt_ms)
+        
         if not alive:
+            logger.warning(f"Нода {node['name']} недоступна после {attempts} попыток")
             incident_id = add_incident(
                 importance="high",
-                description=f"Нода **{node['name']}** ({node['ip']}:{node['port']}) недоступна.",
+                description=f"Нода **{node['name']}** ({node['ip']}:{node['port']}) недоступна (проверено {attempts} раз).",
                 target=target
             )
             if incident_id:
@@ -425,6 +463,19 @@ def scheduled_full_check():
                 if msg_id:
                     set_incident_message_id(incident_id, msg_id)
                 logger.warning(f"Создан инцидент {incident_id} для ноды {node['name']}")
+        else:
+            # Нода работает - проверяем, есть ли активные инциденты для неё
+            from db import get_active_incidents, update_incident_status, log_incident_event
+            active_incidents = get_active_incidents()
+            for inc in active_incidents:
+                if inc['target'] == target and inc['status'] != 'resolved':
+                    # Авто-переход в resolved если нода снова работает
+                    update_incident_status(inc['id'], 'resolved')
+                    log_incident_event(inc['id'], 'auto_resolved', old_status=inc['status'], new_status='resolved')
+                    logger.info(f"Инцидент {inc['id']} автоматически закрыт (нода {node['name']} восстановлена)")
+                    # Обновляем пост в канале
+                    updated_inc = get_incident(inc['id'])
+                    update_incident_post(updated_inc)
 
     # Проверка сайтов маскировки
     sites = get_all_masking_sites()

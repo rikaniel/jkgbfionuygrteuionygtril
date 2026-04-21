@@ -83,6 +83,29 @@ def init_db() -> None:
         )
     ''')
 
+    # Статус нод для uptime/downtime отслеживания
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS node_status (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            node_name TEXT NOT NULL,
+            status TEXT NOT NULL,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            response_time_ms REAL
+        )
+    ''')
+
+    # История инцидентов для статистики
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS incident_stats (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            incident_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            old_status TEXT,
+            new_status TEXT,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
     conn.commit()
     conn.close()
     logger.info("База данных инициализирована")
@@ -527,3 +550,144 @@ def get_inbound_by_name(name: str) -> Optional[Dict[str, Any]]:
             "settings": settings
         }
     return None
+
+
+# ---------------------------- Node Status & Uptime ----------------------------
+def log_node_status(node_name: str, status: str, response_time_ms: float = None) -> None:
+    """Логирует статус ноды для расчёта uptime."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(
+        "INSERT INTO node_status (node_name, status, response_time_ms) VALUES (?, ?, ?)",
+        (node_name, status, response_time_ms)
+    )
+    conn.commit()
+    conn.close()
+
+def get_node_uptime(node_name: str, hours: int = 24) -> Dict[str, Any]:
+    """
+    Рассчитывает uptime ноды за последние N часов.
+    Возвращает: {'uptime_percent': float, 'total_checks': int, 'up_checks': int, 'downtime_events': list}
+    """
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    
+    # Получаем все проверки за последние N часов
+    c.execute("""
+        SELECT status, timestamp, response_time_ms 
+        FROM node_status 
+        WHERE node_name = ? 
+        AND timestamp >= datetime('now', '-' || ? || ' hours')
+        ORDER BY timestamp DESC
+    """, (node_name, hours))
+    rows = c.fetchall()
+    conn.close()
+    
+    if not rows:
+        return {'uptime_percent': 100.0, 'total_checks': 0, 'up_checks': 0, 'downtime_events': []}
+    
+    total_checks = len(rows)
+    up_checks = sum(1 for r in rows if r[0] == 'up')
+    uptime_percent = (up_checks / total_checks * 100) if total_checks > 0 else 100.0
+    
+    # Находим события downtime
+    downtime_events = []
+    prev_status = None
+    for row in reversed(rows):  # chronological order
+        status, ts, rtt = row
+        if prev_status == 'up' and status == 'down':
+            downtime_events.append({'start': ts, 'end': None})
+        elif prev_status == 'down' and status == 'up' and downtime_events:
+            downtime_events[-1]['end'] = ts
+        prev_status = status
+    
+    return {
+        'uptime_percent': round(uptime_percent, 2),
+        'total_checks': total_checks,
+        'up_checks': up_checks,
+        'downtime_events': downtime_events
+    }
+
+def get_all_nodes_uptime(hours: int = 24) -> Dict[str, Dict[str, Any]]:
+    """Возвращает uptime всех нод за последние N часов."""
+    nodes = get_all_nodes()
+    result = {}
+    for node in nodes:
+        result[node['name']] = get_node_uptime(node['name'], hours)
+    return result
+
+
+# ---------------------------- Incident Stats ----------------------------
+def log_incident_event(incident_id: str, event_type: str, old_status: str = None, new_status: str = None) -> None:
+    """Логирует событие инцидента для статистики."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(
+        "INSERT INTO incident_stats (incident_id, event_type, old_status, new_status) VALUES (?, ?, ?, ?)",
+        (incident_id, event_type, old_status, new_status)
+    )
+    conn.commit()
+    conn.close()
+
+def get_incident_stats(period_days: int = 7) -> Dict[str, Any]:
+    """
+    Возвращает статистику инцидентов за последние N дней.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    
+    # Общее количество инцидентов
+    c.execute("""
+        SELECT COUNT(DISTINCT id) FROM incidents 
+        WHERE created_at >= datetime('now', '-' || ? || ' days')
+    """, (period_days,))
+    total_incidents = c.fetchone()[0]
+    
+    # По статусам
+    c.execute("""
+        SELECT status, COUNT(*) FROM incidents 
+        WHERE created_at >= datetime('now', '-' || ? || ' days')
+        GROUP BY status
+    """, (period_days,))
+    by_status = dict(c.fetchall())
+    
+    # По важности
+    c.execute("""
+        SELECT importance, COUNT(*) FROM incidents 
+        WHERE created_at >= datetime('now', '-' || ? || ' days')
+        GROUP BY importance
+    """, (period_days,))
+    by_importance = dict(c.fetchall())
+    
+    # Среднее время решения (для resolved инцидентов)
+    c.execute("""
+        SELECT AVG(julianday(updated_at) - julianday(created_at)) * 24 * 60
+        FROM incidents 
+        WHERE status = 'resolved' 
+        AND updated_at >= datetime('now', '-' || ? || ' days')
+    """, (period_days,))
+    avg_resolution_minutes = c.fetchone()[0]
+    
+    conn.close()
+    
+    return {
+        'total_incidents': total_incidents,
+        'by_status': by_status,
+        'by_importance': by_importance,
+        'avg_resolution_minutes': round(avg_resolution_minutes, 1) if avg_resolution_minutes else 0
+    }
+
+def get_daily_incident_count(days: int = 7) -> List[Dict[str, Any]]:
+    """Возвращает количество инцидентов по дням."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        SELECT DATE(created_at), COUNT(*) 
+        FROM incidents 
+        WHERE created_at >= datetime('now', '-' || ? || ' days')
+        GROUP BY DATE(created_at)
+        ORDER BY DATE(created_at) DESC
+    """, (days,))
+    rows = c.fetchall()
+    conn.close()
+    return [{'date': row[0], 'count': row[1]} for row in rows]
