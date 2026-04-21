@@ -41,6 +41,38 @@ def require_admin(func):
         return func(message)
     return wrapper
 
+def safe_edit_or_send(text: str, chat_id: int, message_id: int = None, reply_markup=None, parse_mode="Markdown"):
+    """
+    Безопасная функция: пытается редактировать сообщение, 
+    если не получается - отправляет новое.
+    """
+    try:
+        if message_id:
+            return bot.edit_message_text(
+                text=text,
+                chat_id=chat_id,
+                message_id=message_id,
+                reply_markup=reply_markup,
+                parse_mode=parse_mode
+            )
+        else:
+            return bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode=parse_mode
+            )
+    except telebot.apihelper.ApiTelegramException as e:
+        if "message can't be edited" in str(e) or "message to edit not found" in str(e):
+            # Если нельзя редактировать - отправляем новое сообщение
+            return bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode=parse_mode
+            )
+        raise
+
 def update_incident_channel_post(incident: Dict[str, Any]):
     """Обновляет или создаёт пост в канале."""
     if not INCIDENT_CHANNEL:
@@ -53,7 +85,7 @@ def update_incident_channel_post(incident: Dict[str, Any]):
     )
     try:
         if incident.get("message_id"):
-            bot.edit_message_text(
+            safe_edit_or_send(
                 chat_id=INCIDENT_CHANNEL,
                 message_id=incident["message_id"],
                 text=text,
@@ -174,7 +206,7 @@ def admin_callback_handler(call: types.CallbackQuery):
             types.InlineKeyboardButton("👑 Администраторы", callback_data="admin_admins_menu"),
             types.InlineKeyboardButton("❌ Закрыть", callback_data="admin_close")
         )
-        bot.edit_message_text(
+        safe_edit_or_send(
             "🔧 **Административная панель**\nВыберите раздел:",
             call.message.chat.id,
             call.message.message_id,
@@ -287,7 +319,7 @@ def show_active_incidents(call: types.CallbackQuery):
     if not incidents:
         markup = types.InlineKeyboardMarkup()
         markup.add(types.InlineKeyboardButton("◀️ Назад", callback_data="admin_menu"))
-        bot.edit_message_text("✅ Нет активных инцидентов.", call.message.chat.id, call.message.message_id, reply_markup=markup)
+        safe_edit_or_send("✅ Нет активных инцидентов.", call.message.chat.id, call.message.message_id, reply_markup=markup)
         return
 
     markup = types.InlineKeyboardMarkup(row_width=1)
@@ -298,12 +330,12 @@ def show_active_incidents(call: types.CallbackQuery):
             callback_data=f"admin_incident_{inc['id']}"
         ))
     markup.add(types.InlineKeyboardButton("◀️ Назад", callback_data="admin_menu"))
-    bot.edit_message_text("📋 **Активные инциденты:**", call.message.chat.id, call.message.message_id, reply_markup=markup)
+    safe_edit_or_send("📋 **Активные инциденты:**", call.message.chat.id, call.message.message_id, reply_markup=markup)
 
 def show_incident_detail(call: types.CallbackQuery, inc_id: str):
     incident = get_incident(inc_id)
     if not incident:
-        bot.edit_message_text("❌ Инцидент не найден.", call.message.chat.id, call.message.message_id)
+        safe_edit_or_send("❌ Инцидент не найден.")
         return
 
     text = (
@@ -322,7 +354,7 @@ def show_incident_detail(call: types.CallbackQuery, inc_id: str):
     )
     markup.add(types.InlineKeyboardButton("🔄 Обновить пост", callback_data=f"admin_inc_refresh_{inc_id}"))
     markup.add(types.InlineKeyboardButton("◀️ К списку", callback_data="admin_incidents"))
-    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup)
+    safe_edit_or_send(text, call.message.chat.id, call.message.message_id, reply_markup=markup)
 
 def change_incident_status_menu(call: types.CallbackQuery, inc_id: str):
     incident = get_incident(inc_id)
@@ -336,7 +368,7 @@ def change_incident_status_menu(call: types.CallbackQuery, inc_id: str):
             continue
         markup.add(types.InlineKeyboardButton(display[st], callback_data=f"admin_inc_setstatus_{inc_id}_{st}"))
     markup.add(types.InlineKeyboardButton("◀️ Назад", callback_data=f"admin_incident_{inc_id}"))
-    bot.edit_message_text(f"Выберите новый статус для инцидента {inc_id}:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+    safe_edit_or_send(f"Выберите новый статус для инцидента {inc_id}:", call.message.chat.id, call.message.message_id, reply_markup=markup)
 
 def set_incident_status(call: types.CallbackQuery, inc_id: str, new_status: str):
     if not update_incident_status(inc_id, new_status):
@@ -349,10 +381,9 @@ def set_incident_status(call: types.CallbackQuery, inc_id: str, new_status: str)
 
 def start_change_description(call: types.CallbackQuery, inc_id: str):
     user_states[call.from_user.id] = {"action": "edit_incident_description", "incident_id": inc_id}
-    msg = bot.edit_message_text(
-        f"Введите новое описание для инцидента {inc_id}:",
+    msg = bot.send_message(
         call.message.chat.id,
-        call.message.message_id
+        f"Введите новое описание для инцидента {inc_id}:"
     )
     bot.register_next_step_handler(msg, process_new_description)
 
@@ -407,7 +438,7 @@ def start_create_incident(call: types.CallbackQuery):
         types.InlineKeyboardButton("🟢 Низкая", callback_data="inc_imp_low"),
         types.InlineKeyboardButton("Отмена", callback_data="admin_menu")
     )
-    bot.edit_message_text(
+    safe_edit_or_send(
         "Выберите важность инцидента:",
         call.message.chat.id,
         call.message.message_id,
@@ -420,7 +451,7 @@ def create_incident_importance_callback(call: types.CallbackQuery):
         return admin_callback_handler(call)
     importance = data.replace("inc_imp_", "")
     user_states[call.from_user.id] = {"action": "create_incident", "importance": importance}
-    msg = bot.edit_message_text(
+    msg = bot.send_message(
         f"Важность: {importance}\nВведите описание инцидента:",
         call.message.chat.id,
         call.message.message_id
@@ -465,23 +496,23 @@ def users_menu(call: types.CallbackQuery):
         types.InlineKeyboardButton("❌ Удалить пользователя", callback_data="admin_users_delete"),
         types.InlineKeyboardButton("◀️ Назад", callback_data="admin_menu")
     )
-    bot.edit_message_text("👥 **Управление пользователями**", call.message.chat.id, call.message.message_id, reply_markup=markup)
+    safe_edit_or_send("👥 **Управление пользователями**", call.message.chat.id, call.message.message_id, reply_markup=markup)
 
 def list_users(call: types.CallbackQuery):
     users = get_all_users()
     if not users:
-        bot.edit_message_text("👥 Нет зарегистрированных пользователей.", call.message.chat.id, call.message.message_id)
+        safe_edit_or_send("👥 Нет зарегистрированных пользователей.")
         return
     text = "**Список пользователей:**\n"
     for u in users:
         text += f"• `{u['telegram_id']}` — {u['client_email']} (inbound {u['inbound_id']})\n"
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("◀️ Назад", callback_data="admin_users_menu"))
-    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup)
+    safe_edit_or_send(text, call.message.chat.id, call.message.message_id, reply_markup=markup)
 
 def start_add_user(call: types.CallbackQuery):
     user_states[call.from_user.id] = {"action": "add_user"}
-    msg = bot.edit_message_text("Введите Telegram ID нового пользователя:", call.message.chat.id, call.message.message_id)
+    msg = bot.send_message(call.message.chat.id, "Введите Telegram ID нового пользователя:")
     bot.register_next_step_handler(msg, add_user_tg_step)
 
 def add_user_tg_step(message: types.Message):
@@ -525,7 +556,7 @@ def add_user_path_step(message: types.Message):
 def start_delete_user(call: types.CallbackQuery):
     users = get_all_users()
     if not users:
-        bot.edit_message_text("Нет пользователей для удаления.", call.message.chat.id, call.message.message_id)
+        safe_edit_or_send("Нет пользователей для удаления.")
         return
     markup = types.InlineKeyboardMarkup(row_width=1)
     for u in users:
@@ -534,12 +565,12 @@ def start_delete_user(call: types.CallbackQuery):
             callback_data=f"admin_user_del_{u['telegram_id']}"
         ))
     markup.add(types.InlineKeyboardButton("◀️ Назад", callback_data="admin_users_menu"))
-    bot.edit_message_text("Выберите пользователя для удаления:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+    safe_edit_or_send("Выберите пользователя для удаления:", call.message.chat.id, call.message.message_id, reply_markup=markup)
 
 def confirm_delete_user(call: types.CallbackQuery, tg_id: int):
     if delete_user(tg_id):
         bot.answer_callback_query(call.id, "Пользователь удалён", show_alert=True)
-        bot.edit_message_text(f"✅ Пользователь {tg_id} удалён.", call.message.chat.id, call.message.message_id)
+        safe_edit_or_send(f"✅ Пользователь {tg_id} удалён.")
     else:
         bot.answer_callback_query(call.id, "Ошибка удаления", show_alert=True)
     users_menu(call)
@@ -555,23 +586,23 @@ def nodes_menu(call: types.CallbackQuery):
         types.InlineKeyboardButton("🔗 Xray Inbounds", callback_data="admin_inbounds_menu"),
         types.InlineKeyboardButton("◀️ Назад", callback_data="admin_menu")
     )
-    bot.edit_message_text("🌐 **Управление нодами**", call.message.chat.id, call.message.message_id, reply_markup=markup)
+    safe_edit_or_send("🌐 **Управление нодами**", call.message.chat.id, call.message.message_id, reply_markup=markup)
 
 def list_nodes(call: types.CallbackQuery):
     nodes = get_all_nodes()
     if not nodes:
-        bot.edit_message_text("🌐 Нет добавленных нод.", call.message.chat.id, call.message.message_id)
+        safe_edit_or_send("🌐 Нет добавленных нод.")
         return
     text = "**Список нод:**\n"
     for n in nodes:
         text += f"• **{n['name']}** — {n['ip']}:{n['port']}\n"
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("◀️ Назад", callback_data="admin_nodes_menu"))
-    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup)
+    safe_edit_or_send(text, call.message.chat.id, call.message.message_id, reply_markup=markup)
 
 def start_add_node(call: types.CallbackQuery):
     user_states[call.from_user.id] = {"action": "add_node"}
-    msg = bot.edit_message_text("Введите имя ноды (уникальное):", call.message.chat.id, call.message.message_id)
+    msg = bot.send_message("Введите имя ноды (уникальное):")
     bot.register_next_step_handler(msg, add_node_name_step)
 
 def add_node_name_step(message: types.Message):
@@ -603,7 +634,7 @@ def add_node_port_step(message: types.Message):
 def start_delete_node(call: types.CallbackQuery):
     nodes = get_all_nodes()
     if not nodes:
-        bot.edit_message_text("Нет нод для удаления.", call.message.chat.id, call.message.message_id)
+        safe_edit_or_send("Нет нод для удаления.")
         return
     markup = types.InlineKeyboardMarkup(row_width=1)
     for n in nodes:
@@ -612,12 +643,12 @@ def start_delete_node(call: types.CallbackQuery):
             callback_data=f"admin_node_del_{n['name']}"
         ))
     markup.add(types.InlineKeyboardButton("◀️ Назад", callback_data="admin_nodes_menu"))
-    bot.edit_message_text("Выберите ноду для удаления:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+    safe_edit_or_send("Выберите ноду для удаления:", call.message.chat.id, call.message.message_id, reply_markup=markup)
 
 def confirm_delete_node(call: types.CallbackQuery, name: str):
     if delete_node(name):
         bot.answer_callback_query(call.id, "Нода удалена", show_alert=True)
-        bot.edit_message_text(f"✅ Нода {name} удалена.", call.message.chat.id, call.message.message_id)
+        safe_edit_or_send(f"✅ Нода {name} удалена.")
     else:
         bot.answer_callback_query(call.id, "Ошибка удаления", show_alert=True)
     nodes_menu(call)
@@ -625,9 +656,9 @@ def confirm_delete_node(call: types.CallbackQuery, name: str):
 def check_all_nodes_action(call: types.CallbackQuery):
     nodes = get_all_nodes()
     if not nodes:
-        bot.edit_message_text("Нет нод для проверки.", call.message.chat.id, call.message.message_id)
+        safe_edit_or_send("Нет нод для проверки.")
         return
-    bot.edit_message_text("⏳ Проверяю доступность нод через proxy...", call.message.chat.id, call.message.message_id)
+    safe_edit_or_send("⏳ Проверяю доступность нод через proxy...")
     
     # Получаем inbounds для прокси-проверки
     inbounds = get_all_inbounds()
@@ -639,7 +670,7 @@ def check_all_nodes_action(call: types.CallbackQuery):
         lines.append(f"• **{node['name']}** ({node['ip']}:{node['port']}): {status}")
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("◀️ Назад", callback_data="admin_nodes_menu"))
-    bot.edit_message_text("\n".join(lines), call.message.chat.id, call.message.message_id, reply_markup=markup)
+    safe_edit_or_send("\n".join(lines), call.message.chat.id, call.message.message_id, reply_markup=markup)
 
 # ---------------------------- Управление сайтами ----------------------------
 def sites_menu(call: types.CallbackQuery):
@@ -651,12 +682,12 @@ def sites_menu(call: types.CallbackQuery):
         types.InlineKeyboardButton("🔍 Проверить все сайты", callback_data="admin_sites_check"),
         types.InlineKeyboardButton("◀️ Назад", callback_data="admin_menu")
     )
-    bot.edit_message_text("🔗 **Управление сайтами маскировки**", call.message.chat.id, call.message.message_id, reply_markup=markup)
+    safe_edit_or_send("🔗 **Управление сайтами маскировки**", call.message.chat.id, call.message.message_id, reply_markup=markup)
 
 def list_sites(call: types.CallbackQuery):
     sites = get_all_masking_sites()
     if not sites:
-        bot.edit_message_text("Нет добавленных сайтов.", call.message.chat.id, call.message.message_id)
+        safe_edit_or_send("Нет добавленных сайтов.")
         return
     text = "**Сайты маскировки:**\n"
     for s in sites:
@@ -664,11 +695,11 @@ def list_sites(call: types.CallbackQuery):
         text += f"• {s['url']} (ожидаемый контент: {exp})\n"
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("◀️ Назад", callback_data="admin_sites_menu"))
-    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup)
+    safe_edit_or_send(text, call.message.chat.id, call.message.message_id, reply_markup=markup)
 
 def start_add_site(call: types.CallbackQuery):
     user_states[call.from_user.id] = {"action": "add_site"}
-    msg = bot.edit_message_text("Введите URL сайта (с http/https):", call.message.chat.id, call.message.message_id)
+    msg = bot.send_message("Введите URL сайта (с http/https):")
     bot.register_next_step_handler(msg, add_site_url_step)
 
 def add_site_url_step(message: types.Message):
@@ -692,7 +723,7 @@ def add_site_content_step(message: types.Message):
 def start_delete_site(call: types.CallbackQuery):
     sites = get_all_masking_sites()
     if not sites:
-        bot.edit_message_text("Нет сайтов для удаления.", call.message.chat.id, call.message.message_id)
+        safe_edit_or_send("Нет сайтов для удаления.")
         return
     markup = types.InlineKeyboardMarkup(row_width=1)
     for s in sites:
@@ -701,12 +732,12 @@ def start_delete_site(call: types.CallbackQuery):
             callback_data=f"admin_site_del_{s['url']}"
         ))
     markup.add(types.InlineKeyboardButton("◀️ Назад", callback_data="admin_sites_menu"))
-    bot.edit_message_text("Выберите сайт для удаления:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+    safe_edit_or_send("Выберите сайт для удаления:", call.message.chat.id, call.message.message_id, reply_markup=markup)
 
 def confirm_delete_site(call: types.CallbackQuery, url: str):
     if delete_masking_site(url):
         bot.answer_callback_query(call.id, "Сайт удалён", show_alert=True)
-        bot.edit_message_text(f"✅ Сайт {url} удалён.", call.message.chat.id, call.message.message_id)
+        safe_edit_or_send(f"✅ Сайт {url} удалён.")
     else:
         bot.answer_callback_query(call.id, "Ошибка удаления", show_alert=True)
     sites_menu(call)
@@ -714,9 +745,9 @@ def confirm_delete_site(call: types.CallbackQuery, url: str):
 def check_all_sites_action(call: types.CallbackQuery):
     sites = get_all_masking_sites()
     if not sites:
-        bot.edit_message_text("Нет сайтов для проверки.", call.message.chat.id, call.message.message_id)
+        safe_edit_or_send("Нет сайтов для проверки.")
         return
-    bot.edit_message_text("⏳ Проверяю сайты...", call.message.chat.id, call.message.message_id)
+    safe_edit_or_send("⏳ Проверяю сайты...")
     lines = ["**Результаты проверки сайтов:**"]
     for site in sites:
         ok = check_website(site['url'], site.get('expected_content'))
@@ -724,7 +755,7 @@ def check_all_sites_action(call: types.CallbackQuery):
         lines.append(f"• {site['url']}: {status}")
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("◀️ Назад", callback_data="admin_sites_menu"))
-    bot.edit_message_text("\n".join(lines), call.message.chat.id, call.message.message_id, reply_markup=markup)
+    safe_edit_or_send("\n".join(lines), call.message.chat.id, call.message.message_id, reply_markup=markup)
 
 # ---------------------------- Управление админами ----------------------------
 def admins_menu(call: types.CallbackQuery):
@@ -735,18 +766,18 @@ def admins_menu(call: types.CallbackQuery):
         types.InlineKeyboardButton("❌ Удалить админа", callback_data="admin_admins_remove"),
         types.InlineKeyboardButton("◀️ Назад", callback_data="admin_menu")
     )
-    bot.edit_message_text("👑 **Управление администраторами**", call.message.chat.id, call.message.message_id, reply_markup=markup)
+    safe_edit_or_send("👑 **Управление администраторами**", call.message.chat.id, call.message.message_id, reply_markup=markup)
 
 def list_admins(call: types.CallbackQuery):
     admins = get_all_admins()
     text = "**Администраторы:**\n" + "\n".join(f"• `{a}`" for a in admins)
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("◀️ Назад", callback_data="admin_admins_menu"))
-    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup)
+    safe_edit_or_send(text, call.message.chat.id, call.message.message_id, reply_markup=markup)
 
 def start_add_admin(call: types.CallbackQuery):
     user_states[call.from_user.id] = {"action": "add_admin"}
-    msg = bot.edit_message_text("Введите Telegram ID нового администратора:", call.message.chat.id, call.message.message_id)
+    msg = bot.send_message("Введите Telegram ID нового администратора:")
     bot.register_next_step_handler(msg, add_admin_step)
 
 def add_admin_step(message: types.Message):
@@ -763,7 +794,7 @@ def add_admin_step(message: types.Message):
 def start_remove_admin(call: types.CallbackQuery):
     admins = get_all_admins()
     if len(admins) <= 1:
-        bot.edit_message_text("Нельзя удалить последнего администратора.", call.message.chat.id, call.message.message_id)
+        safe_edit_or_send("Нельзя удалить последнего администратора.")
         return
     markup = types.InlineKeyboardMarkup(row_width=1)
     for a in admins:
@@ -771,12 +802,12 @@ def start_remove_admin(call: types.CallbackQuery):
             continue
         markup.add(types.InlineKeyboardButton(f"❌ {a}", callback_data=f"admin_admin_del_{a}"))
     markup.add(types.InlineKeyboardButton("◀️ Назад", callback_data="admin_admins_menu"))
-    bot.edit_message_text("Выберите администратора для удаления:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+    safe_edit_or_send("Выберите администратора для удаления:", call.message.chat.id, call.message.message_id, reply_markup=markup)
 
 def confirm_remove_admin(call: types.CallbackQuery, tg_id: int):
     if remove_admin(tg_id):
         bot.answer_callback_query(call.id, "Администратор удалён", show_alert=True)
-        bot.edit_message_text(f"✅ Администратор {tg_id} удалён.", call.message.chat.id, call.message.message_id)
+        safe_edit_or_send(f"✅ Администратор {tg_id} удалён.")
     else:
         bot.answer_callback_query(call.id, "Ошибка", show_alert=True)
     admins_menu(call)
@@ -790,23 +821,23 @@ def inbounds_menu(call: types.CallbackQuery):
         types.InlineKeyboardButton("❌ Удалить Inbound", callback_data="admin_inbounds_delete"),
         types.InlineKeyboardButton("◀️ Назад", callback_data="admin_nodes_menu")
     )
-    bot.edit_message_text("🔗 **Управление Xray Inbounds**\nЭти прокси используются для пинга нод.", call.message.chat.id, call.message.message_id, reply_markup=markup)
+    safe_edit_or_send("🔗 **Управление Xray Inbounds**\nЭти прокси используются для пинга нод.", call.message.chat.id, call.message.message_id, reply_markup=markup)
 
 def list_inbounds(call: types.CallbackQuery):
     inbounds = get_all_inbounds()
     if not inbounds:
-        bot.edit_message_text("🔗 Нет добавленных Xray Inbounds.", call.message.chat.id, call.message.message_id)
+        safe_edit_or_send("🔗 Нет добавленных Xray Inbounds.")
         return
     text = "**Список Xray Inbounds:**\n"
     for ib in inbounds:
         text += f"• **{ib['name']}** — {ib['protocol']}\n"
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("◀️ Назад", callback_data="admin_inbounds_menu"))
-    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup)
+    safe_edit_or_send(text, call.message.chat.id, call.message.message_id, reply_markup=markup)
 
 def start_add_inbound(call: types.CallbackQuery):
     user_states[call.from_user.id] = {"action": "add_inbound"}
-    msg = bot.edit_message_text("Введите имя inbound (уникальное):", call.message.chat.id, call.message.message_id)
+    msg = bot.send_message("Введите имя inbound (уникальное):")
     bot.register_next_step_handler(msg, add_inbound_name_step)
 
 def add_inbound_name_step(message: types.Message):
@@ -848,7 +879,7 @@ def add_inbound_port_step(message: types.Message):
 def start_delete_inbound(call: types.CallbackQuery):
     inbounds = get_all_inbounds()
     if not inbounds:
-        bot.edit_message_text("Нет Inbounds для удаления.", call.message.chat.id, call.message.message_id)
+        safe_edit_or_send("Нет Inbounds для удаления.")
         return
     markup = types.InlineKeyboardMarkup(row_width=1)
     for ib in inbounds:
@@ -857,12 +888,12 @@ def start_delete_inbound(call: types.CallbackQuery):
             callback_data=f"admin_inbound_del_{ib['name']}"
         ))
     markup.add(types.InlineKeyboardButton("◀️ Назад", callback_data="admin_inbounds_menu"))
-    bot.edit_message_text("Выберите Inbound для удаления:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+    safe_edit_or_send("Выберите Inbound для удаления:", call.message.chat.id, call.message.message_id, reply_markup=markup)
 
 def confirm_delete_inbound(call: types.CallbackQuery, name: str):
     if delete_inbound(name):
         bot.answer_callback_query(call.id, "Inbound удалён", show_alert=True)
-        bot.edit_message_text(f"✅ Xray inbound {name} удалён.", call.message.chat.id, call.message.message_id)
+        safe_edit_or_send(f"✅ Xray inbound {name} удалён.")
     else:
         bot.answer_callback_query(call.id, "Ошибка удаления", show_alert=True)
     inbounds_menu(call)
