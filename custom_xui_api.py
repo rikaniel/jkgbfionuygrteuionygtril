@@ -16,27 +16,6 @@ from urllib3.poolmanager import PoolManager
 
 logger = logging.getLogger(__name__)
 
-class SOCKSHTTPAdapter(HTTPAdapter):
-    """Адаптер для поддержки SOCKS прокси в requests"""
-    def __init__(self, proxy_url, *args, **kwargs):
-        self.proxy_url = proxy_url
-        super().__init__(*args, **kwargs)
-
-    def init_poolmanager(self, connections, maxsize, block=False):
-        # Импортируем только если нужен SOCKS
-        try:
-            from requests.packages.urllib3.contrib import socks
-            proxy_manager = socks.SOCKSProxyManager(self.proxy_url)
-            self.poolmanager = proxy_manager
-        except ImportError:
-            # Если socks не установлен, используем обычный HTTP/HTTPS
-            logger.warning("SOCKS прокси запрошен, но urllib3[socks] не установлен. Используем прямое подключение.")
-            self.poolmanager = PoolManager(
-                num_pools=connections,
-                maxsize=maxsize,
-                block=block
-            )
-
 class XUIAPI:
     """Клиент для работы с 3x-ui API (Alireza0/x-ui fork)"""
     
@@ -53,7 +32,10 @@ class XUIAPI:
         
         # Отключаем предупреждения о SSL (для localhost это нормально)
         self.session.verify = False
-        requests.packages.urllib3.disable_warnings(requests.packages.urllib3.exceptions.InsecureRequestWarning)
+        try:
+            requests.packages.urllib3.disable_warnings(requests.packages.urllib3.exceptions.InsecureRequestWarning)
+        except Exception:
+            pass
 
     def _setup_proxy(self):
         """Настройка прокси для сессии"""
@@ -65,18 +47,12 @@ class XUIAPI:
         if proxy.startswith('socks5://'):
             proxy = proxy.replace('socks5://', 'socks5h://')
         
-        # Пробуем установить адаптер для SOCKS
-        try:
-            adapter = SOCKSHTTPAdapter(proxy)
-            self.session.mount('http://', adapter)
-            self.session.mount('https://', adapter)
-            self.session.proxies = {
-                'http': proxy,
-                'https': proxy
-            }
-            logger.info(f"Прокси настроен: {proxy}")
-        except Exception as e:
-            logger.error(f"Ошибка настройки прокси: {e}. Продолжаем без прокси.")
+        # Настраиваем прокси через параметры сессии
+        self.session.proxies = {
+            'http': proxy,
+            'https': proxy
+        }
+        logger.info(f"Прокси настроен: {proxy}")
 
     def login(self) -> bool:
         """Выполнение входа в панель"""
@@ -203,7 +179,18 @@ class XUIAPI:
         
         for inbound in inbounds:
             # Получаем настройки inbound
-            settings = inbound.get('settings', {})
+            settings_raw = inbound.get('settings', '{}')
+            
+            # Если settings - строка (JSON), парсим её
+            if isinstance(settings_raw, str):
+                try:
+                    settings = json.loads(settings_raw)
+                except json.JSONDecodeError as e:
+                    logger.error(f"Ошибка парсинга JSON settings для inbound {inbound.get('id')}: {e}")
+                    continue
+            else:
+                settings = settings_raw
+            
             clients = settings.get('clients', [])
             
             for client in clients:
@@ -217,7 +204,14 @@ class XUIAPI:
         # Логируем все найденные emails для отладки
         all_emails = []
         for inbound in inbounds:
-            settings = inbound.get('settings', {})
+            settings_raw = inbound.get('settings', '{}')
+            if isinstance(settings_raw, str):
+                try:
+                    settings = json.loads(settings_raw)
+                except json.JSONDecodeError:
+                    continue
+            else:
+                settings = settings_raw
             for client in settings.get('clients', []):
                 all_emails.append(client.get('email'))
         
