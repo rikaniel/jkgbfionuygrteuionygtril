@@ -15,14 +15,15 @@ from typing import Dict, Optional, List, Any
 import telebot
 from telebot import types, apihelper
 
-from py3xui import Api, Client
+# Импортируем наш кастомный API клиент вместо py3xui
+from custom_xui_api import get_xui_api, XUIAPI
 
 from db import (
     init_db, get_user, get_all_users,
     sync_nodes_from_config, sync_masking_sites_from_config, sync_inbounds_from_config,
     get_all_nodes, get_all_masking_sites, get_all_inbounds,
     add_incident, get_incident, set_incident_message_id,
-    add_admin, is_admin
+    add_admin, is_admin, get_inbound_by_name
 )
 from checks import check_node, check_website, check_geo_resource
 
@@ -58,10 +59,28 @@ GEOIP_URL = GLOBAL.get("geoip_url")
 GEOSITE_URL = GLOBAL.get("geosite_url")
 
 PROXY = GLOBAL.get("telegram_proxy")
+PANEL_PROXY = GLOBAL.get("panel_proxy")  # Отдельный прокси для панели (может быть null)
+
 if PROXY:
     # Настройка прокси для всех запросов telebot
     apihelper.proxy = {'http': PROXY, 'https': PROXY}
-    logger.info(f"Используется прокси: {PROXY}")
+    logger.info(f"Используется прокси для Telegram: {PROXY}")
+
+# Настройка прокси для 3x-ui API (если указан panel_proxy, иначе используем telegram_proxy)
+api_proxy = PANEL_PROXY if PANEL_PROXY else PROXY
+if api_proxy:
+    import os
+    # Преобразуем socks5://127.0.0.1:10808 в формат для requests
+    if api_proxy.startswith("socks5://"):
+        proxy_for_requests = api_proxy.replace("socks5://", "socks5h://")
+    else:
+        proxy_for_requests = api_proxy
+    os.environ["HTTP_PROXY"] = proxy_for_requests
+    os.environ["HTTPS_PROXY"] = proxy_for_requests
+    logger.info(f"Прокси для 3x-ui API: {proxy_for_requests}")
+else:
+    api_proxy = None
+    logger.info("3x-ui API работает без прокси")
 
 # Создаём бота
 bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode="Markdown")
@@ -80,88 +99,100 @@ for admin_id in GLOBAL.get("admin_ids", []):
 # Вспомогательные функции 3x-ui
 # ------------------------------------------------------------------
 # Глобальный API клиент с автоматическим переподключением
-_api_client = None
+_api_client: Optional[XUIAPI] = None
 _api_last_login_time = 0
 _API_SESSION_TTL = 300  # 5 минут
 
-def get_api_client() -> Api:
+def get_api_client() -> XUIAPI:
     """Возвращает глобальный API клиент с кэшированием сессии."""
     global _api_client, _api_last_login_time
     
-    import time
     current_time = time.time()
     
     # Если клиент существует и сессия ещё действительна - возвращаем его
     if _api_client is not None and (current_time - _api_last_login_time) < _API_SESSION_TTL:
-        return _api_client
+        if _api_client.is_logged_in:
+            logger.debug("Используется кэшированная сессия 3x-ui API")
+            return _api_client
     
-    # Создаём нового клиента
+    # Создаём нового клиента через нашу функцию
     try:
-        _api_client = Api(PANEL_HOST, PANEL_USER, PANEL_PASS)
-        _api_client.login()
+        logger.info(f"Попытка входа в 3x-ui панель: {PANEL_HOST} (user: {PANEL_USER})")
+        _api_client = get_xui_api(PANEL_HOST, PANEL_USER, PANEL_PASS, api_proxy)
         _api_last_login_time = current_time
-        logger.info("Успешный вход в 3x-ui панель")
-        return _api_client
+        
+        if _api_client.is_logged_in:
+            logger.info("✅ Успешный вход в 3x-ui панель")
+            return _api_client
+        else:
+            logger.error("❌ Не удалось войти в 3x-ui панель")
+            raise Exception("Login failed")
+            
     except Exception as e:
-        logger.error(f"Ошибка входа в 3x-ui панель: {e}")
+        logger.error(f"❌ Ошибка входа в 3x-ui панель: {e}", exc_info=True)
         raise
 
-def get_client_by_email(inbound_id: int, email: str) -> Optional[Client]:
+def get_client_by_email(inbound_name: str, email: str) -> Optional[Dict]:
+    """Получает клиента по имени inbound и email через 3x-ui API."""
     try:
         api = get_api_client()
-        inbound = api.inbound.get_by_id(inbound_id)
-        for client in inbound.settings.clients:
-            if client.email == email:
-                return client
+        
+        # Наш кастомный API сам ищет клиента по email во всех inbound'ах
+        client_data = api.get_client_by_email(email)
+        
+        if client_data:
+            # Проверяем, что клиент из нужного inbound
+            client_inbound_name = client_data.get('inbound_remark', '')
+            if str(client_inbound_name) == str(inbound_name) or str(client_data.get('inbound_id')) == str(inbound_name):
+                logger.info(f"✅ Клиент {email} найден в inbound '{inbound_name}'")
+                return client_data
+            else:
+                logger.warning(f"Клиент {email} найден в другом inbound: '{client_inbound_name}' (ожидался '{inbound_name}')")
+                return None
+        
+        logger.warning(f"❌ Клиент {email} не найден в панели")
         return None
+        
     except Exception as e:
-        logger.error(f"Ошибка получения клиента {email}: {e}")
+        logger.error(f"Ошибка получения клиента {email}: {e}", exc_info=True)
         # Пробуем пересоздать клиента при ошибке сессии
         try:
             global _api_client, _api_last_login_time
-            _api_client = Api(PANEL_HOST, PANEL_USER, PANEL_PASS)
-            _api_client.login()
+            _api_client = get_xui_api(PANEL_HOST, PANEL_USER, PANEL_PASS, api_proxy)
             _api_last_login_time = time.time()
-            inbound = _api_client.inbound.get_by_id(inbound_id)
-            for client in inbound.settings.clients:
-                if client.email == email:
-                    return client
+            
+            # Повторяем поиск
+            client_data = _api_client.get_client_by_email(email)
+            if client_data:
+                return client_data
         except Exception as e2:
-            logger.error(f"Повторная ошибка получения клиента {email}: {e2}")
+            logger.error(f"Повторная ошибка получения клиента {email}: {e2}", exc_info=True)
         return None
 
-def get_client_traffic(client: Client):
+def get_client_traffic(client_data: Dict) -> Optional[Dict]:
+    """Получает трафик клиента из API."""
     api = get_api_client()
-    data = None
-    if client.id:
-        try:
-            data = api.client.get_traffic_by_id(client.id)
-        except:
-            pass
-    if data is None:
-        try:
-            data = api.client.get_traffic_by_email(client.email)
-        except:
-            pass
-
-    up = down = total = 0
-    if isinstance(data, list):
-        data = data[0] if data else {}
-    if isinstance(data, dict):
-        up = data.get('up', 0)
-        down = data.get('down', 0)
-        total = data.get('total', 0)
-    elif hasattr(data, 'up'):
-        up = data.up
-        down = data.down
-        total = data.total
-
-    class Traffic: pass
-    t = Traffic()
-    t.up = up
-    t.down = down
-    t.total = total
-    return t
+    
+    inbound_id = client_data.get('inbound_id')
+    email = client_data.get('email')
+    
+    if not inbound_id or not email:
+        logger.error("Нет inbound_id или email для получения трафика")
+        return None
+    
+    # Получаем статистику через наш API
+    stats = api.get_client_stats(inbound_id, email)
+    
+    if stats:
+        return {
+            'up': stats.get('up', 0),
+            'down': stats.get('down', 0),
+            'total': stats.get('total', 0)
+        }
+    
+    # Если не получили статистику, возвращаем дефолтные значения
+    logger.warning(f"Не удалось получить статистику для {email}, возвращаем нули")
+    return {'up': 0, 'down': 0, 'total': 0}
 
 def format_bytes(num: int) -> str:
     for unit in ['Б', 'КБ', 'МБ', 'ГБ', 'ТБ']:
@@ -218,15 +249,14 @@ def update_incident_post(incident: Dict[str, Any]):
 # Клавиатуры
 # ------------------------------------------------------------------
 def main_menu_keyboard():
-    markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("📊 Статистика", callback_data="status"))
-    markup.add(types.InlineKeyboardButton("🔗 Ссылка на подписку", callback_data="link"))
-    markup.add(types.InlineKeyboardButton("ℹ️ Помощь", callback_data="help"))
+    markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
+    markup.add("📊 Статистика", "🔗 Ссылка на подписку")
+    markup.add("ℹ️ Помощь")
     return markup
 
 def back_to_menu_keyboard():
-    markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("◀️ Назад в меню", callback_data="menu"))
+    markup = types.ReplyKeyboardMarkup(row_width=1, resize_keyboard=True)
+    markup.add("◀️ Назад в меню")
     return markup
 
 # ------------------------------------------------------------------
@@ -244,7 +274,7 @@ def start(message: types.Message):
 
     markup = main_menu_keyboard()
     if is_admin(user_id):
-        markup.add(types.InlineKeyboardButton("🔧 Админ-панель", callback_data="admin_menu"))
+        markup.add("🔧 Админ-панель")
 
     bot.send_message(
         message.chat.id,
@@ -252,69 +282,92 @@ def start(message: types.Message):
         reply_markup=markup
     )
 
-@bot.callback_query_handler(func=lambda call: True)
-def handle_callback(call: types.CallbackQuery):
-    user_id = call.from_user.id
-    data = call.data
+@bot.message_handler(func=lambda message: True)
+def handle_message(message: types.Message):
+    user_id = message.from_user.id
+    text = message.text
 
-    # Админские колбэки обрабатываются в отдельном модуле admin.py
-    if data.startswith("admin_") or data.startswith("inc_imp_"):
-        # Эти колбэки будут обработаны в admin_callback_handler
+    # Игнорируем команды (они обрабатываются отдельно)
+    if text.startswith('/'):
         return
+
+    # Проверяем, является ли пользователь админом и пытается ли использовать админ-меню
+    if is_admin(user_id):
+        from admin import admin_text_handler, require_admin
+        # Обработка текстовых кнопок админ-панели
+        admin_texts = ["📋 Активные инциденты", "➕ Создать инцидент", "👥 Управление пользователями", 
+                       "🌐 Управление нодами", "🔗 Сайты маскировки", "👑 Администраторы", "❌ Закрыть"]
+        if text in admin_texts:
+            admin_text_handler(message)
+            return
 
     user = get_user(user_id)
     if not user:
-        bot.edit_message_text("⛔ Доступ запрещён.", call.message.chat.id, call.message.message_id)
+        bot.reply_to(message, "⛔ Доступ запрещён.")
         return
 
-    if data == "menu":
+    if text == "◀️ Назад в меню":
         markup = main_menu_keyboard()
         if is_admin(user_id):
-            markup.add(types.InlineKeyboardButton("🔧 Админ-панель", callback_data="admin_menu"))
-        bot.edit_message_text(
+            markup.add("🔧 Админ-панель")
+        bot.send_message(
+            message.chat.id,
             "👋 **Главное меню**\nВыберите действие:",
-            call.message.chat.id,
-            call.message.message_id,
             reply_markup=markup
         )
         return
 
-    if data == "help":
+    if text == "ℹ️ Помощь":
         help_text = (
             "📌 **Доступные возможности:**\n"
             "• *Статистика* — текущий расход трафика и срок действия подписки.\n"
             "• *Ссылка на подписку* — URL для импорта в клиент.\n\n"
         )
-        bot.edit_message_text(
+        bot.send_message(
+            message.chat.id,
             help_text,
-            call.message.chat.id,
-            call.message.message_id,
             reply_markup=back_to_menu_keyboard()
         )
         return
 
-    inbound_id = user["inbound_id"]
+    inbound_name = user.get("inbound_name") or user.get("inbound_id")
     client_email = user["client_email"]
 
-    client = get_client_by_email(inbound_id, client_email)
+    if not inbound_name:
+        bot.send_message(
+            message.chat.id,
+            f"❌ Ошибка конфигурации: не указан inbound для пользователя.",
+            reply_markup=back_to_menu_keyboard()
+        )
+        logger.error(f"У пользователя {user_id} не указан inbound_name или inbound_id")
+        return
+
+    client = get_client_by_email(inbound_name, client_email)
     if not client:
-        bot.edit_message_text(
-            f"❌ Клиент `{client_email}` не найден в inbound {inbound_id}.",
-            call.message.chat.id,
-            call.message.message_id,
+        bot.send_message(
+            message.chat.id,
+            f"❌ Клиент `{client_email}` не найден в inbound '{inbound_name}'. Проверьте настройки.",
             reply_markup=back_to_menu_keyboard()
         )
         return
 
-    if data == "status":
-        bot.edit_message_text("⏳ Запрос данных с сервера...", call.message.chat.id, call.message.message_id)
+    if text == "📊 Статистика":
+        bot.send_message(message.chat.id, "⏳ Запрос данных с сервера...")
         try:
             traffic = get_client_traffic(client)
-            up = format_bytes(traffic.up)
-            down = format_bytes(traffic.down)
-            total = format_bytes(traffic.total)
-            expiry = format_expiry(client.expiry_time)
-            total_quota = format_bytes(client.total_gb * 1024**3) if client.total_gb > 0 else "∞"
+            if traffic:
+                up = format_bytes(traffic['up'])
+                down = format_bytes(traffic['down'])
+                total = format_bytes(traffic['total'])
+            else:
+                up = down = total = "0 Б"
+            
+            # Получаем данные о сроке действия и лимитах из client_data
+            expiry_time = client.get('expiryTime', client.get('expiry_time', 0))
+            total_gb = client.get('totalGB', client.get('total_gb', 0))
+            
+            expiry = format_expiry(expiry_time)
+            total_quota = format_bytes(total_gb * 1024**3) if total_gb > 0 else "∞"
 
             status_text = (
                 f"📊 **Статистика подписки** `{client_email}`\n"
@@ -325,36 +378,58 @@ def handle_callback(call: types.CallbackQuery):
                 f"⏳ Истекает: {expiry}\n"
                 f"🕒 Обновлено: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}"
             )
-            bot.edit_message_text(
+            bot.send_message(
+                message.chat.id,
                 status_text,
-                call.message.chat.id,
-                call.message.message_id,
                 reply_markup=back_to_menu_keyboard()
             )
         except Exception as e:
-            logger.error(f"Ошибка получения статуса: {e}")
-            bot.edit_message_text(
+            logger.error(f"Ошибка получения статуса: {e}", exc_info=True)
+            bot.send_message(
+                message.chat.id,
                 "❌ Не удалось получить статистику.",
-                call.message.chat.id,
-                call.message.message_id,
                 reply_markup=back_to_menu_keyboard()
             )
 
-    elif data == "link":
+    elif text == "🔗 Ссылка на подписку":
         sub_url = f"{SUB_BASE}{user['subscription_path']}"
-        bot.edit_message_text(
+        bot.send_message(
+            message.chat.id,
             f"🔗 **Ваша ссылка для подписки:**\n`{sub_url}`\n\n"
             "⚠️ Никому не передавайте эту ссылку!",
-            call.message.chat.id,
-            call.message.message_id,
             reply_markup=back_to_menu_keyboard()
         )
 
-    bot.answer_callback_query(call.id)
+    elif text == "🔧 Админ-панель":
+        if is_admin(user_id):
+            from admin import admin_menu_handler
+            admin_menu_handler(message)
+        else:
+            bot.reply_to(message, "⛔ У вас нет доступа к админ-панели.")
 
 # ------------------------------------------------------------------
 # Фоновые задачи (запускаются в отдельном потоке)
 # ------------------------------------------------------------------
+
+# Retry configuration для анти-фолс-позитив
+RETRY_ATTEMPTS = 3
+RETRY_DELAY_SECONDS = 10
+AUTO_TRANSITION_MINUTES = 5  # Время до авто-перевода registered -> in_progress
+
+def check_node_with_retry(node: Dict, inbounds: List[Dict], timeout: int, max_attempts: int = RETRY_ATTEMPTS) -> tuple:
+    """
+    Проверяет ноду с retry логикой для предотвращения false positives.
+    Возвращает (is_alive, attempts_made)
+    """
+    for attempt in range(max_attempts):
+        alive = check_node(node['ip'], node['port'], timeout=timeout, inbounds=inbounds)
+        if alive:
+            return (True, attempt + 1)
+        if attempt < max_attempts - 1:
+            logger.warning(f"Попытка {attempt + 1} проверки ноды {node['name']} не удалась, ждём {RETRY_DELAY_SECONDS}с...")
+            time.sleep(RETRY_DELAY_SECONDS)
+    return (False, max_attempts)
+
 def scheduled_full_check():
     """Полная проверка всех систем: ноды, сайты, geo-ресурсы."""
     logger.info("Запуск плановой проверки нод и сайтов...")
@@ -362,16 +437,24 @@ def scheduled_full_check():
     # Получаем все inbound'ы для прокси-пинга
     inbounds = get_all_inbounds()
     
-    # Проверка нод через proxy
+    # Проверка нод через proxy с retry логикой
     nodes = get_all_nodes()
     for node in nodes:
         target = f"node:{node['name']}"
-        # Пинг через первый доступный inbound (proxy)
-        alive = check_node(node['ip'], node['port'], timeout=PING_TIMEOUT, inbounds=inbounds)
+        
+        # Проверка с retry
+        alive, attempts = check_node_with_retry(node, inbounds, PING_TIMEOUT)
+        
+        # Логируем статус для uptime статистики
+        from db import log_node_status
+        rtt_ms = None  # Можно добавить измерение RTT в check_node
+        log_node_status(node['name'], 'up' if alive else 'down', rtt_ms)
+        
         if not alive:
+            logger.warning(f"Нода {node['name']} недоступна после {attempts} попыток")
             incident_id = add_incident(
                 importance="high",
-                description=f"Нода **{node['name']}** ({node['ip']}:{node['port']}) недоступна.",
+                description=f"Нода **{node['name']}** ({node['ip']}:{node['port']}) недоступна (проверено {attempts} раз).",
                 target=target
             )
             if incident_id:
@@ -380,6 +463,19 @@ def scheduled_full_check():
                 if msg_id:
                     set_incident_message_id(incident_id, msg_id)
                 logger.warning(f"Создан инцидент {incident_id} для ноды {node['name']}")
+        else:
+            # Нода работает - проверяем, есть ли активные инциденты для неё
+            from db import get_active_incidents, update_incident_status, log_incident_event
+            active_incidents = get_active_incidents()
+            for inc in active_incidents:
+                if inc['target'] == target and inc['status'] != 'resolved':
+                    # Авто-переход в resolved если нода снова работает
+                    update_incident_status(inc['id'], 'resolved')
+                    log_incident_event(inc['id'], 'auto_resolved', old_status=inc['status'], new_status='resolved')
+                    logger.info(f"Инцидент {inc['id']} автоматически закрыт (нода {node['name']} восстановлена)")
+                    # Обновляем пост в канале
+                    updated_inc = get_incident(inc['id'])
+                    update_incident_post(updated_inc)
 
     # Проверка сайтов маскировки
     sites = get_all_masking_sites()
