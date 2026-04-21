@@ -15,7 +15,8 @@ from typing import Dict, Optional, List, Any
 import telebot
 from telebot import types, apihelper
 
-from py3xui import Api, Client
+# Импортируем наш кастомный API клиент вместо py3xui
+from custom_xui_api import get_xui_api, XUIAPI
 
 from db import (
     init_db, get_user, get_all_users,
@@ -58,10 +59,28 @@ GEOIP_URL = GLOBAL.get("geoip_url")
 GEOSITE_URL = GLOBAL.get("geosite_url")
 
 PROXY = GLOBAL.get("telegram_proxy")
+PANEL_PROXY = GLOBAL.get("panel_proxy")  # Отдельный прокси для панели (может быть null)
+
 if PROXY:
     # Настройка прокси для всех запросов telebot
     apihelper.proxy = {'http': PROXY, 'https': PROXY}
-    logger.info(f"Используется прокси: {PROXY}")
+    logger.info(f"Используется прокси для Telegram: {PROXY}")
+
+# Настройка прокси для 3x-ui API (если указан panel_proxy, иначе используем telegram_proxy)
+api_proxy = PANEL_PROXY if PANEL_PROXY else PROXY
+if api_proxy:
+    import os
+    # Преобразуем socks5://127.0.0.1:10808 в формат для requests
+    if api_proxy.startswith("socks5://"):
+        proxy_for_requests = api_proxy.replace("socks5://", "socks5h://")
+    else:
+        proxy_for_requests = api_proxy
+    os.environ["HTTP_PROXY"] = proxy_for_requests
+    os.environ["HTTPS_PROXY"] = proxy_for_requests
+    logger.info(f"Прокси для 3x-ui API: {proxy_for_requests}")
+else:
+    api_proxy = None
+    logger.info("3x-ui API работает без прокси")
 
 # Создаём бота
 bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode="Markdown")
@@ -80,62 +99,58 @@ for admin_id in GLOBAL.get("admin_ids", []):
 # Вспомогательные функции 3x-ui
 # ------------------------------------------------------------------
 # Глобальный API клиент с автоматическим переподключением
-_api_client = None
+_api_client: Optional[XUIAPI] = None
 _api_last_login_time = 0
 _API_SESSION_TTL = 300  # 5 минут
 
-def get_api_client() -> Api:
+def get_api_client() -> XUIAPI:
     """Возвращает глобальный API клиент с кэшированием сессии."""
     global _api_client, _api_last_login_time
     
-    import time
     current_time = time.time()
     
     # Если клиент существует и сессия ещё действительна - возвращаем его
     if _api_client is not None and (current_time - _api_last_login_time) < _API_SESSION_TTL:
-        return _api_client
+        if _api_client.is_logged_in:
+            logger.debug("Используется кэшированная сессия 3x-ui API")
+            return _api_client
     
-    # Создаём нового клиента
+    # Создаём нового клиента через нашу функцию
     try:
-        _api_client = Api(PANEL_HOST, PANEL_USER, PANEL_PASS)
-        _api_client.login()
+        logger.info(f"Попытка входа в 3x-ui панель: {PANEL_HOST} (user: {PANEL_USER})")
+        _api_client = get_xui_api(PANEL_HOST, PANEL_USER, PANEL_PASS, api_proxy)
         _api_last_login_time = current_time
-        logger.info("Успешный вход в 3x-ui панель")
-        return _api_client
+        
+        if _api_client.is_logged_in:
+            logger.info("✅ Успешный вход в 3x-ui панель")
+            return _api_client
+        else:
+            logger.error("❌ Не удалось войти в 3x-ui панель")
+            raise Exception("Login failed")
+            
     except Exception as e:
-        logger.error(f"Ошибка входа в 3x-ui панель: {e}")
+        logger.error(f"❌ Ошибка входа в 3x-ui панель: {e}", exc_info=True)
         raise
 
-def get_client_by_email(inbound_name: str, email: str) -> Optional[Client]:
+def get_client_by_email(inbound_name: str, email: str) -> Optional[Dict]:
     """Получает клиента по имени inbound и email через 3x-ui API."""
     try:
         api = get_api_client()
         
-        # Получаем все inbound'ы из API и ищем по имени
-        all_inbounds = api.inbound.get_list()
-        inbound_id = None
+        # Наш кастомный API сам ищет клиента по email во всех inbound'ах
+        client_data = api.get_client_by_email(email)
         
-        for ib in all_inbounds:
-            if ib.name == inbound_name or str(ib.id) == str(inbound_name):
-                inbound_id = ib.id
-                logger.info(f"Найден inbound '{inbound_name}' с ID={inbound_id}")
-                break
+        if client_data:
+            # Проверяем, что клиент из нужного inbound
+            client_inbound_name = client_data.get('inbound_remark', '')
+            if str(client_inbound_name) == str(inbound_name) or str(client_data.get('inbound_id')) == str(inbound_name):
+                logger.info(f"✅ Клиент {email} найден в inbound '{inbound_name}'")
+                return client_data
+            else:
+                logger.warning(f"Клиент {email} найден в другом inbound: '{client_inbound_name}' (ожидался '{inbound_name}')")
+                return None
         
-        if not inbound_id:
-            logger.error(f"Inbound '{inbound_name}' не найден в 3x-ui панели")
-            return None
-            
-        # Получаем inbound из API по ID
-        inbound_data = api.inbound.get_by_id(inbound_id)
-        
-        # Ищем клиента по email
-        for client in inbound_data.settings.clients:
-            if client.email == email:
-                logger.info(f"Клиент {email} найден в inbound {inbound_name}")
-                return client
-        
-        logger.warning(f"Клиент {email} не найден в inbound {inbound_name} (ID: {inbound_id})")
-        logger.warning(f"Доступные клиенты в inbound: {[c.email for c in inbound_data.settings.clients]}")
+        logger.warning(f"❌ Клиент {email} не найден в панели")
         return None
         
     except Exception as e:
@@ -143,58 +158,41 @@ def get_client_by_email(inbound_name: str, email: str) -> Optional[Client]:
         # Пробуем пересоздать клиента при ошибке сессии
         try:
             global _api_client, _api_last_login_time
-            _api_client = Api(PANEL_HOST, PANEL_USER, PANEL_PASS)
-            _api_client.login()
+            _api_client = get_xui_api(PANEL_HOST, PANEL_USER, PANEL_PASS, api_proxy)
             _api_last_login_time = time.time()
             
             # Повторяем поиск
-            all_inbounds = _api_client.inbound.get_list()
-            for ib in all_inbounds:
-                if ib.name == inbound_name or str(ib.id) == str(inbound_name):
-                    inbound_id = ib.id
-                    break
-            
-            if inbound_id:
-                inbound_data = _api_client.inbound.get_by_id(inbound_id)
-                for client in inbound_data.settings.clients:
-                    if client.email == email:
-                        return client
+            client_data = _api_client.get_client_by_email(email)
+            if client_data:
+                return client_data
         except Exception as e2:
             logger.error(f"Повторная ошибка получения клиента {email}: {e2}", exc_info=True)
         return None
 
-def get_client_traffic(client: Client):
+def get_client_traffic(client_data: Dict) -> Optional[Dict]:
+    """Получает трафик клиента из API."""
     api = get_api_client()
-    data = None
-    if client.id:
-        try:
-            data = api.client.get_traffic_by_id(client.id)
-        except:
-            pass
-    if data is None:
-        try:
-            data = api.client.get_traffic_by_email(client.email)
-        except:
-            pass
-
-    up = down = total = 0
-    if isinstance(data, list):
-        data = data[0] if data else {}
-    if isinstance(data, dict):
-        up = data.get('up', 0)
-        down = data.get('down', 0)
-        total = data.get('total', 0)
-    elif hasattr(data, 'up'):
-        up = data.up
-        down = data.down
-        total = data.total
-
-    class Traffic: pass
-    t = Traffic()
-    t.up = up
-    t.down = down
-    t.total = total
-    return t
+    
+    inbound_id = client_data.get('inbound_id')
+    email = client_data.get('email')
+    
+    if not inbound_id or not email:
+        logger.error("Нет inbound_id или email для получения трафика")
+        return None
+    
+    # Получаем статистику через наш API
+    stats = api.get_client_stats(inbound_id, email)
+    
+    if stats:
+        return {
+            'up': stats.get('up', 0),
+            'down': stats.get('down', 0),
+            'total': stats.get('total', 0)
+        }
+    
+    # Если не получили статистику, возвращаем дефолтные значения
+    logger.warning(f"Не удалось получить статистику для {email}, возвращаем нули")
+    return {'up': 0, 'down': 0, 'total': 0}
 
 def format_bytes(num: int) -> str:
     for unit in ['Б', 'КБ', 'МБ', 'ГБ', 'ТБ']:
@@ -347,11 +345,19 @@ def handle_message(message: types.Message):
         bot.send_message(message.chat.id, "⏳ Запрос данных с сервера...")
         try:
             traffic = get_client_traffic(client)
-            up = format_bytes(traffic.up)
-            down = format_bytes(traffic.down)
-            total = format_bytes(traffic.total)
-            expiry = format_expiry(client.expiry_time)
-            total_quota = format_bytes(client.total_gb * 1024**3) if client.total_gb > 0 else "∞"
+            if traffic:
+                up = format_bytes(traffic['up'])
+                down = format_bytes(traffic['down'])
+                total = format_bytes(traffic['total'])
+            else:
+                up = down = total = "0 Б"
+            
+            # Получаем данные о сроке действия и лимитах из client_data
+            expiry_time = client.get('expiryTime', client.get('expiry_time', 0))
+            total_gb = client.get('totalGB', client.get('total_gb', 0))
+            
+            expiry = format_expiry(expiry_time)
+            total_quota = format_bytes(total_gb * 1024**3) if total_gb > 0 else "∞"
 
             status_text = (
                 f"📊 **Статистика подписки** `{client_email}`\n"
@@ -368,7 +374,7 @@ def handle_message(message: types.Message):
                 reply_markup=back_to_menu_keyboard()
             )
         except Exception as e:
-            logger.error(f"Ошибка получения статуса: {e}")
+            logger.error(f"Ошибка получения статуса: {e}", exc_info=True)
             bot.send_message(
                 message.chat.id,
                 "❌ Не удалось получить статистику.",
